@@ -1,0 +1,23 @@
+from django.urls import path
+from .views import (
+    OrderListCreateView,
+    OrderDetailView,
+    ParcelListCreateView,
+    ParcelDetailView,
+    ParcelTrackView,
+    ParcelGroupView, # Import de la nouvelle vue
+)
+
+urlpatterns = [
+    # URLs pour les commandes (maintenant directement sous /api/orders/ après inclusion)
+    path('orders/', OrderListCreateView.as_view(), name='order-list-create'),
+    path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
+
+    # URLs pour les colis (maintenant directement sous /api/parcels/ après inclusion)
+    path('parcels/', ParcelListCreateView.as_view(), name='parcel-list-create'),
+    path('parcels/<str:tracking_number>/', ParcelDetailView.as_view(), name='parcel-detail'),
+    path('parcels/<str:tracking_number>/track/', ParcelTrackView.as_view(), name='parcel-track'),
+    
+    # URL pour le groupage de colis
+    path('parcels/group/', ParcelGroupView.as_view(), name='parcel-group'),
+]
