@@ -20,6 +20,7 @@ class RegisterView(APIView):
                 'email': user.email,
                 'role': user.role,
                 'full_name': user.full_name,
+                'phone_number': user.phone_number, # Ajout de phone_number à la réponse
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -32,4 +33,3 @@ class UserProfileView(APIView):
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
-
