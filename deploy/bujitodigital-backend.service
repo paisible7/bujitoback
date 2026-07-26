@@ -1,0 +1,26 @@
+[Unit]
+Description=BujitoDigital Django API (Gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+
+# Adjust these paths for your VPS:
+WorkingDirectory=/var/www/bujitodigital-backend
+EnvironmentFile=/var/www/bujitodigital-backend/.env
+
+User=www-data
+Group=www-data
+
+# Use the venv python + gunicorn installed from requirements.txt
+ExecStart=/var/www/bujitodigital-backend/venv/bin/gunicorn backend.wsgi:application \
+  --bind 127.0.0.1:8000 \
+  --workers 3 \
+  --timeout 60
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+

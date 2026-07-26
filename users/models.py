@@ -30,6 +30,7 @@ class CustomUser(AbstractUser):
     phone_number = models.CharField(max_length=20, unique=True, blank=True, null=True) # Added phone_number field
     full_name = models.CharField(max_length=255, blank=True, default='')
     role = models.CharField(max_length=10, choices=[('admin', 'Admin'), ('user', 'User')], default='user')
+    language = models.CharField(max_length=5, choices=[('fr', 'Français'), ('en', 'English')], default='fr')
 
     objects = CustomUserManager()
 

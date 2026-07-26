@@ -1,0 +1,23 @@
+# Django
+*.log
+*.pyc
+__pycache__/
+db.sqlite3
+media/
+static/
+staticfiles/
+
+# Environnement et Secrets
+.env
+venv/
+env/
+ENV/
+firebase-service-account.json
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

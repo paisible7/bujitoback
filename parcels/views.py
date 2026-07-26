@@ -1,3 +1,5 @@
+import base64
+from django.core.files.base import ContentFile
 from rest_framework import generics, status, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,6 +15,7 @@ from .serializers import (
     ConsolidationCreateSerializer # Importez le sérialiseur de création de Consolidation
 )
 from users.permissions import IsAdminUser
+from users.models import CustomUser
 
 class OrderListCreateView(generics.ListCreateAPIView):
     queryset = Order.objects.all()
@@ -78,6 +81,7 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ParcelSerializer
     permission_classes = [IsAuthenticated]
     queryset = Parcel.objects.all()
+    lookup_field = 'tracking_number' # Important pour matcher l'URL
 
     def get_object(self):
         obj = super().get_object()
@@ -177,3 +181,90 @@ class ConsolidationDetailView(generics.RetrieveAPIView):
         if obj.user != self.request.user and self.request.user.role != 'admin':
             self.permission_denied(self.request)
         return obj
+
+class ParcelBulkImportView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        parcels_data = request.data.get('parcels', [])
+        created_count = 0
+        updated_count = 0
+        errors = []
+
+        with transaction.atomic():
+            for data in parcels_data:
+                tracking = data.get('tracking_number')
+                if not tracking:
+                    continue
+
+                # Tenter de lier à un utilisateur via Email ou Téléphone
+                user_email = data.pop('user_email', None)
+                client_phone = data.get('client_phone')
+                user = None
+
+                if user_email:
+                    user = CustomUser.objects.filter(email=user_email).first()
+                elif client_phone:
+                    # On nettoie le numéro pour la recherche (enlever les espaces)
+                    clean_phone = client_phone.replace(' ', '')
+                    user = CustomUser.objects.filter(phone_number__icontains=clean_phone).first()
+
+                # Optionnel : Associer à une commande existante
+                order_id = data.pop('order', None)
+                order = None
+                if order_id:
+                    order = Order.objects.filter(id=order_id).first()
+                elif user:
+                    # Si on a trouvé un utilisateur, on cherche sa dernière commande en attente
+                    order = Order.objects.filter(user=user, status='pending').first()
+
+                try:
+                    # Préparation des données de base
+                    defaults = {
+                        'status': data.get('status', 'pending'),
+                        'current_location': data.get('current_location'),
+                        'description': data.get('description'),
+                        'client_name': data.get('client_name'),
+                        'client_phone': data.get('client_phone'),
+                        'weight_volume': data.get('weight_volume'),
+                        'warehouse_number': data.get('warehouse_number'),
+                    }
+
+                    # Gestion de l'image en Base64
+                    image_data = data.get('package_photo') or data.get('image')
+                    if image_data and isinstance(image_data, str) and image_data.startswith('data:image'):
+                        try:
+                            format, imgstr = image_data.split(';base64,')
+                            ext = format.split('/')[-1]
+                            filename = f"parcel_{tracking}.{ext}"
+                            defaults['image'] = ContentFile(base64.b64decode(imgstr), name=filename)
+                        except Exception as e:
+                            errors.append(f"Image corrompue pour {tracking}: {str(e)}")
+
+                    parcel, created = Parcel.objects.update_or_create(
+                        tracking_number=tracking,
+                        defaults=defaults
+                    )
+
+                    # Mise à jour de l'ordre si trouvé (uniquement si pas déjà lié ou si admin force)
+                    if order and (parcel.order is None or parcel.order != order):
+                        parcel.order = order
+                        parcel.save()
+                    elif user and parcel.order is None:
+                        # Si on a un user mais pas d'order, on pourrait créer une commande fantôme ou juste stocker l'info
+                        pass
+
+                    if created:
+                        created_count += 1
+                    else:
+                        updated_count += 1
+                except Exception as e:
+                    errors.append(f"Erreur pour {tracking}: {str(e)}")
+
+        return Response({
+            "created": created_count,
+            "updated": updated_count,
+            "failed": len(errors),
+            "errors": errors,
+            "message": "Import bulk terminé"
+        }, status=status.HTTP_200_OK)

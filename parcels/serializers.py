@@ -5,7 +5,12 @@ from users.serializers import UserSerializer # Pour inclure les détails de l'ut
 class ParcelSerializer(serializers.ModelSerializer):
     class Meta:
         model = Parcel
-        fields = '__all__' # Inclut tous les champs du modèle Parcel
+        fields = [
+            'id', 'tracking_number', 'status', 'current_location',
+            'client_name', 'client_phone', 'weight_volume',
+            'warehouse_number', 'description', 'image', 'last_updated', 'order'
+        ]
+        read_only_fields = ('last_updated',)
 
 class OrderSerializer(serializers.ModelSerializer):
     parcels = ParcelSerializer(many=True, read_only=True) # Pour afficher les colis liés à la commande
@@ -21,6 +26,8 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         fields = ['total_amount', 'status'] # Champs que l'on peut définir à la création
         extra_kwargs = {'status': {'required': False}} # Le statut n'est pas obligatoire, il a une valeur par défaut
 
+from django.utils.translation import gettext as _
+
 class ConsolidationSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(source='request_date', read_only=True)
     group_name = serializers.SerializerMethodField()
@@ -33,7 +40,7 @@ class ConsolidationSerializer(serializers.ModelSerializer):
         read_only_fields = ('user', 'request_date', 'status')
 
     def get_group_name(self, obj):
-        return f"Groupage #{obj.id}"
+        return f"{_('Groupage')} #{obj.id}"
 
 class ConsolidationCreateSerializer(serializers.Serializer):
     tracking_numbers = serializers.ListField(

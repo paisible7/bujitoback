@@ -1,9 +1,14 @@
 from django.contrib import admin
 from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from users.views import CustomTokenObtainPairView
+from notifications.views import NotificationViewSet
+
+router = DefaultRouter()
+router.register(r'notifications', NotificationViewSet, basename='notification')
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -15,6 +20,9 @@ urlpatterns = [
     # Utilisateurs
     path('api/auth/', include('users.urls')),
 
-    # Commandes et Colis (maintenant inclus directement sous /api/)
+    # Notifications, Commandes et Colis (inclus sous /api/)
+    path('api/', include(router.urls)),
     path('api/', include('parcels.urls')),
+    path('api/payments/', include('payments.urls')),
+    path('api/orders/', include('orders.urls')),
 ]

@@ -1,0 +1,195 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Bujito Digital\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-05-20 17:15+0000\n"
+"PO-Revision-Date: 2024-05-20 17:15+0000\n"
+"Last-Translator: \n"
+"Language-Team: English\n"
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Bujito Digital"
+msgstr "Bujito Digital"
+
+msgid "Votre système de notification fonctionne parfaitement."
+msgstr "Your notification system is working perfectly."
+
+msgid "Succès : Notification envoyée à %(email)s"
+msgstr "Success: Notification sent to %(email)s"
+
+msgid "Erreur lors de l'envoi"
+msgstr "Error during sending"
+
+msgid "En attente"
+msgstr "Pending"
+
+msgid "En traitement"
+msgstr "Processing"
+
+msgid "Expédiée"
+msgstr "Shipped"
+
+msgid "Livrée"
+msgstr "Delivered"
+
+msgid "Annulée"
+msgstr "Cancelled"
+
+msgid "En transit"
+msgstr "In transit"
+
+msgid "En cours de livraison"
+msgstr "Out for delivery"
+
+msgid "Livré"
+msgstr "Delivered"
+
+msgid "Exception"
+msgstr "Exception"
+
+msgid "Consolidé"
+msgstr "Consolidated"
+
+msgid "Terminé"
+msgstr "Completed"
+
+msgid "Annulé"
+msgstr "Cancelled"
+
+msgid "Utilisateur"
+msgstr "User"
+
+msgid "Date de commande"
+msgstr "Order date"
+
+msgid "Statut"
+msgstr "Status"
+
+msgid "Montant total"
+msgstr "Total amount"
+
+msgid "Commande"
+msgstr "Order"
+
+msgid "Commandes"
+msgstr "Orders"
+
+msgid "Colis"
+msgstr "Parcel"
+
+msgid "Numéro de suivi"
+msgstr "Tracking number"
+
+msgid "Emplacement actuel"
+msgstr "Current location"
+
+msgid "Description"
+msgstr "Description"
+
+msgid "Dernière mise à jour"
+msgstr "Last updated"
+
+msgid "Groupage"
+msgstr "Consolidation"
+
+msgid "Groupages"
+msgstr "Consolidations"
+
+msgid "Date de création"
+msgstr "Creation date"
+
+msgid "Appareil FCM"
+msgstr "FCM Device"
+
+msgid "Appareils FCM"
+msgstr "FCM Devices"
+
+msgid "Token"
+msgstr "Token"
+
+msgid "Plateforme"
+msgstr "Platform"
+
+msgid "Titre"
+msgstr "Title"
+
+msgid "Message"
+msgstr "Message"
+
+msgid "Type"
+msgstr "Type"
+
+msgid "ID de référence"
+msgstr "Reference ID"
+
+msgid "Lu"
+msgstr "Read"
+
+msgid "Notification"
+msgstr "Notification"
+
+msgid "Notifications"
+msgstr "Notifications"
+
+msgid "Nom"
+msgstr "Name"
+
+msgid "Code"
+msgstr "Code"
+
+msgid "Actif"
+msgstr "Active"
+
+msgid "URL de l'icône"
+msgstr "Icon URL"
+
+msgid "Méthode de paiement"
+msgstr "Payment method"
+
+msgid "Méthodes de paiement"
+msgstr "Payment methods"
+
+msgid "Paiement"
+msgstr "Payment"
+
+msgid "Paiements"
+msgstr "Payments"
+
+msgid "Montant"
+msgstr "Amount"
+
+msgid "Référence"
+msgstr "Reference"
+
+msgid "ID externe"
+msgstr "External ID"
+
+msgid "Méthode"
+msgstr "Method"
+
+msgid "URL de paiement"
+msgstr "Payment URL"
+
+msgid "Réponse brute du fournisseur"
+msgstr "Provider raw response"
+
+msgid "Action"
+msgstr "Action"
+
+msgid "Test"
+msgstr "Test"
+
+msgid "Envoyer une notification maintenant"
+msgstr "Send notification now"
+
+msgid "Enregistrez d'abord l'appareil"
+msgstr "Register the device first"
+
+msgid "French"
+msgstr "French"
+
+msgid "English"
+msgstr "English"

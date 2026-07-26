@@ -8,14 +8,16 @@ from .views import (
     ParcelGroupView,
     ConsolidationListView,
     ConsolidationDetailView,
-    # ConsolidationListCreateView, # Commenté car la vue n'existe pas encore
-    # ConsolidationDetailView,     # Commenté car la vue n'existe pas encore
+    ParcelBulkImportView,
 )
 
 urlpatterns = [
     # URLs pour les commandes (maintenant directement sous /api/orders/ après inclusion)
     path('orders/', OrderListCreateView.as_view(), name='order-list-create'),
     path('orders/<int:pk>/', OrderDetailView.as_view(), name='order-detail'),
+
+    # URL pour l'import bulk
+    path('parcels/bulk/', ParcelBulkImportView.as_view(), name='parcel-bulk-import'),
 
     # URL pour le groupage de colis
     path('parcels/group/', ParcelGroupView.as_view(), name='parcel-group'),
