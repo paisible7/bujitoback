@@ -8,26 +8,16 @@ logger = logging.getLogger(__name__)
 
 from .text_sanitizer import strip_emojis
 
-def initialize_firebase():
-    """Initialise Firebase Admin SDK si ce n'est pas déjà fait."""
-    if not firebase_admin._apps:
-        # Chemin vers le fichier JSON que vous allez télécharger depuis Firebase Console
-        cred_path = os.path.join(settings.BASE_DIR, 'firebase-service-account.json')
-        if os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred)
-        else:
-            logger.error(f"Fichier Firebase introuvable à : {cred_path}")
-
 from django.utils import translation
 from django.utils.translation import gettext as _
 
 def send_fcm_notification(user, title, body, data=None, *, type="info", reference_id=None):
     """Envoie une notification à tous les appareils enregistrés d'un utilisateur."""
+    # L'initialisation est maintenant gérée par NotificationsConfig.ready() dans apps.py
+
     # Activer la langue de l'utilisateur pour la traduction
     user_language = getattr(user, 'language', 'fr')
     with translation.override(user_language):
-        initialize_firebase()
         from .models import FCMDevice, Notification
 
         # On s'assure que les textes sont traduits
