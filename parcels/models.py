@@ -16,6 +16,15 @@ class Order(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name=_("Statut"))
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name=_("Montant total"))
 
+    # Détails de la demande produit (côté client)
+    client_name = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("Nom client"))
+    client_phone = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Téléphone"))
+    country = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("Pays"))
+    city = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("Ville"))
+    product_links = models.TextField(blank=True, null=True, verbose_name=_("Liens produits"))
+    quantity = models.PositiveIntegerField(default=1, verbose_name=_("Quantité"))
+    comment = models.TextField(blank=True, null=True, verbose_name=_("Commentaire"))
+
     class Meta:
         ordering = ['-order_date']
         verbose_name = _("Commande")
@@ -23,6 +32,20 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order {self.id} - {self.user.email}"
+
+
+class OrderImage(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='images', verbose_name=_("Commande"))
+    image = models.ImageField(upload_to='orders/', verbose_name=_("Image"))
+    uploaded_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date d'upload"))
+
+    class Meta:
+        verbose_name = _("Image de commande")
+        verbose_name_plural = _("Images de commande")
+
+    def __str__(self):
+        return f"OrderImage {self.id} - Order {self.order_id}"
+
 
 class Parcel(models.Model):
     PARCEL_STATUS_CHOICES = [

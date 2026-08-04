@@ -9,6 +9,7 @@ from .views import (
     ConsolidationListView,
     ConsolidationDetailView,
     ParcelBulkImportView,
+    ParcelImagesZipImportView,
 )
 
 urlpatterns = [
@@ -18,6 +19,7 @@ urlpatterns = [
 
     # URL pour l'import bulk
     path('parcels/bulk/', ParcelBulkImportView.as_view(), name='parcel-bulk-import'),
+    path('parcels/import-images/', ParcelImagesZipImportView.as_view(), name='parcel-images-zip-import'),
 
     # URL pour le groupage de colis
     path('parcels/group/', ParcelGroupView.as_view(), name='parcel-group'),

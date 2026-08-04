@@ -1,4 +1,6 @@
 import base64
+import os
+import zipfile
 from django.core.files.base import ContentFile
 from rest_framework import generics, status, filters
 from rest_framework.response import Response
@@ -6,13 +8,14 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction # Pour les opérations atomiques
 from django.http import Http404
-from .models import Order, Parcel, Consolidation # Importez Consolidation
+from .models import Order, Parcel, Consolidation, OrderImage # Importez Consolidation
 from .serializers import (
     OrderSerializer,
     ParcelSerializer,
     OrderCreateSerializer,
-    ConsolidationSerializer, # Importez le sérialiseur de Consolidation
-    ConsolidationCreateSerializer # Importez le sérialiseur de création de Consolidation
+    ConsolidationSerializer,
+    ConsolidationCreateSerializer,
+    ConsolidationUpdateSerializer,
 )
 from users.permissions import IsAdminUser
 from users.models import CustomUser
@@ -40,22 +43,34 @@ class OrderListCreateView(generics.ListCreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        
+
+        # Photos produit envoyées en multipart (champ "images")
+        for uploaded in request.FILES.getlist('images'):
+            OrderImage.objects.create(order=serializer.instance, image=uploaded)
+
         headers = self.get_success_headers(serializer.data)
-        full_serializer = OrderSerializer(serializer.instance)
+        full_serializer = OrderSerializer(serializer.instance, context={'request': request})
         return Response(full_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
 
-class OrderDetailView(generics.RetrieveAPIView):
+class OrderDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
     queryset = Order.objects.all()
 
     def get_object(self):
         obj = super().get_object()
-        if obj.user != self.request.user and self.request.user.role != 'admin':
+        if self.request.method in ('GET', 'HEAD', 'OPTIONS'):
+            if obj.user != self.request.user and self.request.user.role != 'admin':
+                self.permission_denied(self.request)
+            return obj
+        if self.request.user.role != 'admin':
             self.permission_denied(self.request)
         return obj
+
+    def perform_update(self, serializer):
+        # Admin peut surtout changer le statut (et éventuellement le montant)
+        serializer.save()
 
 class ParcelListCreateView(generics.ListCreateAPIView):
     serializer_class = ParcelSerializer
@@ -123,14 +138,11 @@ class ParcelGroupView(APIView):
         eligible_statuses = ['pending', 'in_transit'] # Statuts éligibles au groupage
 
         with transaction.atomic():
-            # 1. Récupérer les colis et vérifier l'appartenance et l'éligibilité
             parcels_to_group = []
             for tn in tracking_numbers:
                 try:
                     parcel = Parcel.objects.get(tracking_number=tn)
-                    # Vérifier que le colis appartient à l'utilisateur ou est sans commande (si votre logique le permet)
-                    # Pour l'instant, on suppose qu'il doit être lié à une commande de l'utilisateur
-                    if parcel.order and parcel.order.user != user:
+                    if not parcel.order or parcel.order.user != user:
                         return Response(
                             {"detail": f"Le colis {tn} n'appartient pas à l'utilisateur."},
                             status=status.HTTP_403_FORBIDDEN
@@ -140,23 +152,25 @@ class ParcelGroupView(APIView):
                             {"detail": f"Le colis {tn} n'est pas dans un statut éligible au groupage (doit être 'En attente' ou 'En transit')."},
                             status=status.HTTP_400_BAD_REQUEST
                         )
+                    already_grouped = Consolidation.objects.filter(
+                        status__in=['pending', 'processing'],
+                        parcels=parcel,
+                    ).exists()
+                    if already_grouped:
+                        return Response(
+                            {"detail": f"Le colis {tn} fait déjà partie d'une demande de groupage en cours."},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
                     parcels_to_group.append(parcel)
                 except Parcel.DoesNotExist:
                     return Response(
                         {"detail": f"Le colis avec le numéro de suivi {tn} n'existe pas."},
                         status=status.HTTP_404_NOT_FOUND
                     )
-            
-            # 2. Créer la demande de groupage (Consolidation)
-            consolidation = Consolidation.objects.create(user=user, status='processing')
-            consolidation.parcels.set(parcels_to_group) # Ajoute tous les colis au groupage
 
-            # 3. Mettre à jour le statut des colis groupés
-            for parcel in parcels_to_group:
-                parcel.status = 'consolidated' # Nouveau statut pour les colis groupés
-                parcel.save()
+            consolidation = Consolidation.objects.create(user=user, status='pending')
+            consolidation.parcels.set(parcels_to_group)
 
-            # 4. Retourner la consolidation créée
             response_serializer = ConsolidationSerializer(consolidation)
             return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -171,14 +185,23 @@ class ConsolidationListView(generics.ListAPIView):
         return Consolidation.objects.filter(user=self.request.user)
 
 
-class ConsolidationDetailView(generics.RetrieveAPIView):
+class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = ConsolidationSerializer
     permission_classes = [IsAuthenticated]
     queryset = Consolidation.objects.all()
 
+    def get_serializer_class(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return ConsolidationUpdateSerializer
+        return ConsolidationSerializer
+
     def get_object(self):
         obj = super().get_object()
-        if obj.user != self.request.user and self.request.user.role != 'admin':
+        if self.request.method == 'GET':
+            if obj.user != self.request.user and self.request.user.role != 'admin':
+                self.permission_denied(self.request)
+            return obj
+        if self.request.user.role != 'admin':
             self.permission_denied(self.request)
         return obj
 
@@ -267,4 +290,76 @@ class ParcelBulkImportView(APIView):
             "failed": len(errors),
             "errors": errors,
             "message": "Import bulk terminé"
+        }, status=status.HTTP_200_OK)
+
+
+class ParcelImagesZipImportView(APIView):
+    """Importe un ZIP d'images et les associe aux colis par nom de fichier."""
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+
+    def post(self, request):
+        zip_file = request.FILES.get('file')
+        if not zip_file:
+            return Response(
+                {"detail": "Aucun fichier ZIP fourni."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not zip_file.name.lower().endswith('.zip'):
+            return Response(
+                {"detail": "Le fichier doit être une archive ZIP."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        matched = 0
+        skipped = 0
+        errors = []
+
+        try:
+            with zipfile.ZipFile(zip_file) as archive:
+                for entry in archive.namelist():
+                    if entry.endswith('/') or entry.startswith('__MACOSX/'):
+                        continue
+
+                    basename = os.path.basename(entry)
+                    if not basename or basename.startswith('.'):
+                        skipped += 1
+                        continue
+
+                    _, ext = os.path.splitext(basename)
+                    if ext.lower() not in self._IMAGE_EXTENSIONS:
+                        skipped += 1
+                        continue
+
+                    stem = os.path.splitext(basename)[0]
+                    parcel = (
+                        Parcel.objects.filter(tracking_number=stem).first()
+                        or Parcel.objects.filter(tracking_number=basename).first()
+                        or Parcel.objects.filter(description__icontains=basename).first()
+                    )
+
+                    if parcel is None:
+                        errors.append(f"Aucun colis trouvé pour l'image {basename}")
+                        continue
+
+                    try:
+                        content = archive.read(entry)
+                        parcel.image.save(basename, ContentFile(content), save=True)
+                        matched += 1
+                    except Exception as exc:
+                        errors.append(f"Erreur pour {basename}: {exc}")
+        except zipfile.BadZipFile:
+            return Response(
+                {"detail": "Archive ZIP invalide."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            "matched": matched,
+            "skipped": skipped,
+            "failed": len(errors),
+            "errors": errors,
+            "message": f"{matched} image(s) associée(s) aux colis.",
         }, status=status.HTTP_200_OK)

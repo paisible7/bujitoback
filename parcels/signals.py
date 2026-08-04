@@ -3,9 +3,9 @@ from __future__ import annotations
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 
-from notifications.utils import send_fcm_notification
+from notifications.utils import send_fcm_notification, notify_admins
 
-from .models import Parcel, Order
+from .models import Parcel, Order, Consolidation
 
 
 @receiver(pre_save, sender=Parcel)
@@ -74,3 +74,70 @@ def _order_post_save(sender, instance: Order, created: bool, **kwargs):
         data={"type": "order", "reference_id": instance.pk},
     )
 
+
+@receiver(pre_save, sender=Consolidation)
+def _consolidation_pre_save(sender, instance: Consolidation, **kwargs):
+    if not instance.pk:
+        instance._old_status = None
+        return
+    try:
+        old = Consolidation.objects.only("status").get(pk=instance.pk)
+        instance._old_status = old.status
+    except Consolidation.DoesNotExist:
+        instance._old_status = None
+
+
+@receiver(post_save, sender=Consolidation)
+def _consolidation_post_save(sender, instance: Consolidation, created: bool, **kwargs):
+    user = instance.user
+    parcel_count = instance.parcels.count()
+
+    if created:
+        notify_admins(
+            "Nouvelle demande de groupage",
+            f"{user.email} demande le groupage de {parcel_count} colis (#{instance.pk}).",
+            type="consolidation",
+            reference_id=instance.pk,
+            data={"type": "consolidation", "reference_id": instance.pk},
+        )
+        send_fcm_notification(
+            user,
+            "Demande de groupage envoyee",
+            f"Votre demande de groupage #{instance.pk} ({parcel_count} colis) est en attente de validation.",
+            type="consolidation",
+            reference_id=instance.pk,
+            data={"type": "consolidation", "reference_id": instance.pk},
+        )
+        return
+
+    old_status = getattr(instance, "_old_status", None)
+    if old_status == instance.status:
+        return
+
+    if instance.status == "completed":
+        send_fcm_notification(
+            user,
+            "Groupage accepte",
+            f"Votre groupage #{instance.pk} a ete accepte. Vos colis seront expedies prochainement.",
+            type="consolidation",
+            reference_id=instance.pk,
+            data={"type": "consolidation", "reference_id": instance.pk, "status": "completed"},
+        )
+    elif instance.status == "cancelled":
+        send_fcm_notification(
+            user,
+            "Groupage refuse",
+            f"Votre demande de groupage #{instance.pk} a ete refusee.",
+            type="consolidation",
+            reference_id=instance.pk,
+            data={"type": "consolidation", "reference_id": instance.pk, "status": "cancelled"},
+        )
+    elif instance.status == "processing":
+        send_fcm_notification(
+            user,
+            "Groupage en cours",
+            f"Votre groupage #{instance.pk} est en cours de preparation.",
+            type="consolidation",
+            reference_id=instance.pk,
+            data={"type": "consolidation", "reference_id": instance.pk, "status": "processing"},
+        )

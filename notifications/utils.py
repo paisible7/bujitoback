@@ -66,3 +66,23 @@ def send_fcm_notification(user, title, body, data=None, *, type="info", referenc
             "success_count": response.success_count,
             "failure_count": response.failure_count
         }
+
+
+def notify_admins(title, body, *, type="info", reference_id=None, data=None):
+    """Envoie une notification à tous les administrateurs."""
+    from users.models import CustomUser
+
+    admins = CustomUser.objects.filter(role='admin', is_active=True)
+    results = []
+    for admin in admins:
+        results.append(
+            send_fcm_notification(
+                admin,
+                title,
+                body,
+                data=data,
+                type=type,
+                reference_id=reference_id,
+            )
+        )
+    return results
