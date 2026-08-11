@@ -100,3 +100,76 @@ class Consolidation(models.Model):
 
     def __str__(self):
         return f"Consolidation {self.id} - {self.user.email}"
+
+
+class ConsolidationParcelDecision(models.Model):
+    """Décision admin par colis au sein d'une demande de groupage."""
+
+    DECISION_CHOICES = [
+        ('pending', _('En attente')),
+        ('accepted', _('Validé')),
+        ('rejected', _('Refusé')),
+    ]
+
+    consolidation = models.ForeignKey(
+        Consolidation,
+        on_delete=models.CASCADE,
+        related_name='parcel_decisions',
+        verbose_name=_("Groupage"),
+    )
+    parcel = models.ForeignKey(
+        Parcel,
+        on_delete=models.CASCADE,
+        related_name='consolidation_decisions',
+        verbose_name=_("Colis"),
+    )
+    decision = models.CharField(
+        max_length=20,
+        choices=DECISION_CHOICES,
+        default='pending',
+        verbose_name=_("Décision"),
+    )
+    updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Mis à jour"))
+
+    class Meta:
+        unique_together = ('consolidation', 'parcel')
+        verbose_name = _("Décision colis (groupage)")
+        verbose_name_plural = _("Décisions colis (groupage)")
+
+    def __str__(self):
+        return f"Groupage #{self.consolidation_id} / colis #{self.parcel_id}: {self.decision}"
+
+
+class ImportBatch(models.Model):
+    """Historique d'un fichier importé (xlsx / csv / zip)."""
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='import_batches',
+        verbose_name=_("Importé par"),
+    )
+    file_name = models.CharField(max_length=255, verbose_name=_("Nom du fichier"))
+    file_type = models.CharField(max_length=20, blank=True, default='', verbose_name=_("Type"))
+    file = models.FileField(
+        upload_to='imports/%Y/%m/%d/',
+        blank=True,
+        null=True,
+        verbose_name=_("Fichier"),
+    )
+    created_count = models.PositiveIntegerField(default=0, verbose_name=_("Créés"))
+    updated_count = models.PositiveIntegerField(default=0, verbose_name=_("Mis à jour"))
+    failed_count = models.PositiveIntegerField(default=0, verbose_name=_("Échecs"))
+    matched_count = models.PositiveIntegerField(default=0, verbose_name=_("Associés"))
+    message = models.TextField(blank=True, default='', verbose_name=_("Message"))
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date d'import"))
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = _("Import")
+        verbose_name_plural = _("Imports")
+
+    def __str__(self):
+        return f"{self.file_name} ({self.created_at:%Y-%m-%d %H:%M})"

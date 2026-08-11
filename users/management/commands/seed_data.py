@@ -148,8 +148,11 @@ class Command(BaseCommand):
         return files
 
     def _attach_image(self, field, path: Path, dest_name: str):
+        # Ne pas préfixer avec upload_to (ex: parcels/) — Django le fait déjà.
+        name = Path(dest_name).name
         with path.open('rb') as f:
-            field.save(dest_name, File(f), save=True)
+            field.save(name, File(f), save=True)
+        self.stdout.write(f'    + image {name} -> {getattr(field, "name", "?")}')
 
     def _seed_client(self, user, methods, prefix):
         # Évite de doubler si déjà seedé (colis avec tracking préfixe)

@@ -143,26 +143,62 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         method_code = (request.data.get("method") or "").strip().lower()
         phone_number = (request.data.get("phone_number") or "").strip()
         saved_method_id = request.data.get("saved_method_id")
+        transfer_type = (request.data.get("type") or "").strip().lower()
+        is_transfer = transfer_type == "money_transfer"
 
-        if not order_id:
-            return Response({"message": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST)
         if not method_code:
             return Response({"message": "method is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            order = Order.objects.get(pk=int(order_id), user=request.user)
-        except Exception:
-            return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        if order.status.lower() != "pending":
-            return Response({"message": "Order is not pending"}, status=status.HTTP_400_BAD_REQUEST)
 
         available = set(_available_method_codes())
         if method_code not in available:
             return Response({"message": "Payment method not available"}, status=status.HTTP_400_BAD_REQUEST)
 
+        method = _ensure_method(method_code)
+        if not method.is_active:
+            return Response({"message": "Payment method inactive"}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = None
+        amount = None
+        meta = None
+
+        if is_transfer:
+            try:
+                amount = float(request.data.get("amount"))
+            except (TypeError, ValueError):
+                return Response({"message": "amount is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if amount <= 0:
+                return Response({"message": "amount must be positive"}, status=status.HTTP_400_BAD_REQUEST)
+
+            beneficiary_name = (request.data.get("beneficiary_name") or "").strip()
+            beneficiary_phone = (request.data.get("beneficiary_phone") or "").strip()
+            note = (request.data.get("note") or "").strip()
+            if not beneficiary_name:
+                return Response({"message": "beneficiary_name is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not beneficiary_phone:
+                return Response({"message": "beneficiary_phone is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not phone_number:
+                phone_number = beneficiary_phone
+
+            meta = {
+                "type": "money_transfer",
+                "beneficiary_name": beneficiary_name,
+                "beneficiary_phone": beneficiary_phone,
+                "note": note,
+            }
+        else:
+            if not order_id:
+                return Response({"message": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                order = Order.objects.get(pk=int(order_id), user=request.user)
+            except Exception:
+                return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            if order.status.lower() != "pending":
+                return Response({"message": "Order is not pending"}, status=status.HTTP_400_BAD_REQUEST)
+            amount = order.total_amount
+
         if method_code in {"orange_money", "mtn_momo", "wave", "moov"} and not phone_number:
-            # If user selected a saved method, allow missing phone_number.
             if saved_method_id:
                 try:
                     saved = SavedPaymentMethod.objects.get(pk=int(saved_method_id), user=request.user)
@@ -172,20 +208,16 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             if not phone_number:
                 return Response({"message": "phone_number is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        method = _ensure_method(method_code)
-        if not method.is_active:
-            return Response({"message": "Payment method inactive"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Create pending payment.
         payment = Payment.objects.create(
             user=request.user,
             order=order,
-            amount=order.total_amount,
+            amount=amount,
             currency="XOF",
             method=method,
-            reference=f"PAY-{uuid.uuid4().hex[:10].upper()}",
+            reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
             status="pending",
             phone_number=phone_number or None,
+            provider_raw_response=meta,
         )
 
         checkout_url = PaymentService.initiate_payment(payment)
@@ -196,7 +228,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 "transaction": tx,
                 "redirect_url": checkout_url,
                 "ussd_code": None,
-                "message": "Paiement initialisé",
+                "message": "Transfert initié" if is_transfer else "Paiement initialisé",
             },
             status=status.HTTP_200_OK,
         )

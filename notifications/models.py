@@ -26,6 +26,12 @@ class Notification(models.Model):
     message = models.TextField(verbose_name=_("Message"))
     type = models.CharField(max_length=50, default='general', verbose_name=_("Type"))
     reference_id = models.IntegerField(null=True, blank=True, verbose_name=_("ID de référence"))
+    image = models.ImageField(
+        upload_to='notifications/',
+        null=True,
+        blank=True,
+        verbose_name=_("Image / annonce"),
+    )
     is_read = models.BooleanField(default=False, verbose_name=_("Lu"))
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date de création"))
 

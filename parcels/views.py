@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction # Pour les opérations atomiques
 from django.http import Http404
-from .models import Order, Parcel, Consolidation, OrderImage # Importez Consolidation
+from .models import Order, Parcel, Consolidation, OrderImage, ImportBatch # Importez Consolidation
 from .serializers import (
     OrderSerializer,
     ParcelSerializer,
@@ -180,10 +180,14 @@ class ConsolidationListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        qs = Consolidation.objects.prefetch_related(
+            'parcels',
+            'parcel_decisions',
+            'user',
+        )
         if self.request.user.is_authenticated and self.request.user.role == 'admin':
-            return Consolidation.objects.all()
-        return Consolidation.objects.filter(user=self.request.user)
-
+            return qs.all()
+        return qs.filter(user=self.request.user)
 
 class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = ConsolidationSerializer
@@ -209,7 +213,19 @@ class ParcelBulkImportView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request):
+        import json
+        import os
+
         parcels_data = request.data.get('parcels', [])
+        if isinstance(parcels_data, str):
+            try:
+                parcels_data = json.loads(parcels_data)
+            except json.JSONDecodeError:
+                return Response(
+                    {"message": "parcels JSON invalide"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         created_count = 0
         updated_count = 0
         errors = []
@@ -284,14 +300,75 @@ class ParcelBulkImportView(APIView):
                 except Exception as e:
                     errors.append(f"Erreur pour {tracking}: {str(e)}")
 
+        uploaded = request.FILES.get('file')
+        file_name = (request.data.get('file_name') or '').strip()
+        if not file_name and uploaded is not None:
+            file_name = uploaded.name
+        if not file_name:
+            file_name = 'import'
+
+        ext = os.path.splitext(file_name)[1].lstrip('.').lower()
+        batch = ImportBatch.objects.create(
+            user=request.user,
+            file_name=file_name,
+            file_type=ext,
+            created_count=created_count,
+            updated_count=updated_count,
+            failed_count=len(errors),
+            message="Import bulk terminé",
+        )
+        if uploaded is not None:
+            batch.file.save(uploaded.name, uploaded, save=True)
+
         return Response({
             "created": created_count,
             "updated": updated_count,
             "failed": len(errors),
             "errors": errors,
-            "message": "Import bulk terminé"
+            "message": "Import bulk terminé",
+            "import_id": batch.id,
         }, status=status.HTTP_200_OK)
 
+
+class ImportBatchListView(APIView):
+    """Liste des imports, filtrable par jour (?date=YYYY-MM-DD)."""
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        from datetime import datetime
+
+        qs = ImportBatch.objects.select_related('user').all()
+        date_str = (request.query_params.get('date') or '').strip()
+        if date_str:
+            try:
+                day = datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {"message": "Format de date invalide (YYYY-MM-DD)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(created_at__date=day)
+
+        results = []
+        for batch in qs[:200]:
+            file_url = None
+            if batch.file:
+                file_url = request.build_absolute_uri(batch.file.url)
+            results.append({
+                "id": batch.id,
+                "file_name": batch.file_name,
+                "file_type": batch.file_type,
+                "file_url": file_url,
+                "created": batch.created_count,
+                "updated": batch.updated_count,
+                "failed": batch.failed_count,
+                "matched": batch.matched_count,
+                "message": batch.message,
+                "created_at": batch.created_at.isoformat().replace('+00:00', 'Z'),
+                "user_email": getattr(batch.user, 'email', None),
+            })
+
+        return Response({"results": results, "date": date_str or None}, status=status.HTTP_200_OK)
 
 class ParcelImagesZipImportView(APIView):
     """Importe un ZIP d'images et les associe aux colis par nom de fichier."""
@@ -356,10 +433,26 @@ class ParcelImagesZipImportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        batch = ImportBatch.objects.create(
+            user=request.user,
+            file_name=zip_file.name,
+            file_type='zip',
+            matched_count=matched,
+            failed_count=len(errors),
+            message=f"{matched} image(s) associée(s) aux colis.",
+        )
+        # Ré-enregistrer une copie du ZIP (le pointeur fichier peut être au milieu)
+        try:
+            zip_file.seek(0)
+            batch.file.save(zip_file.name, zip_file, save=True)
+        except Exception:
+            pass
+
         return Response({
             "matched": matched,
             "skipped": skipped,
             "failed": len(errors),
             "errors": errors,
             "message": f"{matched} image(s) associée(s) aux colis.",
+            "import_id": batch.id,
         }, status=status.HTTP_200_OK)

@@ -55,7 +55,14 @@ class NotificationViewSet(viewsets.ModelViewSet):
         if request.user.role != 'admin':
             return Response({"detail": "Action réservée aux administrateurs."}, status=status.HTTP_403_FORBIDDEN)
 
-        serializer = AdminSendNotificationSerializer(data=request.data)
+        # Multipart: send_to_all arrive souvent en string "true"/"false"
+        mutable = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'send_to_all' in mutable:
+            val = mutable.get('send_to_all')
+            if isinstance(val, str):
+                mutable['send_to_all'] = val.lower() in ('1', 'true', 'yes', 'on')
+
+        serializer = AdminSendNotificationSerializer(data=mutable)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
@@ -63,6 +70,13 @@ class NotificationViewSet(viewsets.ModelViewSet):
             recipients = User.objects.filter(role='user', is_active=True)
         else:
             recipients = User.objects.filter(pk=data['user_id'])
+
+        image_file = data.get('image') or request.FILES.get('image')
+        image_bytes = None
+        image_name = None
+        if image_file is not None:
+            image_bytes = image_file.read()
+            image_name = getattr(image_file, 'name', 'annonce.jpg')
 
         sent_count = 0
         push_count = 0
@@ -73,6 +87,9 @@ class NotificationViewSet(viewsets.ModelViewSet):
                 data['message'],
                 type=data.get('type', 'general'),
                 data={'type': data.get('type', 'general')},
+                image_bytes=image_bytes,
+                image_name=image_name,
+                request=request,
             )
             sent_count += 1
             if result.get('success'):

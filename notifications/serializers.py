@@ -9,6 +9,17 @@ User = get_user_model()
 
 
 class NotificationSerializer(serializers.ModelSerializer):
+    image = serializers.SerializerMethodField()
+
+    def get_image(self, obj):
+        if not obj.image:
+            return None
+        request = self.context.get('request')
+        url = obj.image.url
+        if request is not None:
+            return request.build_absolute_uri(url)
+        return url
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["title"] = strip_emojis(data.get("title"))
@@ -17,8 +28,8 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Notification
-        fields = ['id', 'title', 'message', 'type', 'reference_id', 'is_read', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'title', 'message', 'type', 'reference_id', 'image', 'is_read', 'created_at']
+        read_only_fields = ['id', 'created_at', 'image']
 
 
 class AdminSendNotificationSerializer(serializers.Serializer):
@@ -27,6 +38,7 @@ class AdminSendNotificationSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(required=False)
     send_to_all = serializers.BooleanField(default=False)
     type = serializers.CharField(max_length=50, default='general', required=False)
+    image = serializers.ImageField(required=False, allow_null=True)
 
     def validate(self, attrs):
         send_to_all = attrs.get('send_to_all', False)

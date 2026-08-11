@@ -10,6 +10,7 @@ from .views import (
     ConsolidationDetailView,
     ParcelBulkImportView,
     ParcelImagesZipImportView,
+    ImportBatchListView,
 )
 
 urlpatterns = [
@@ -20,6 +21,7 @@ urlpatterns = [
     # URL pour l'import bulk
     path('parcels/bulk/', ParcelBulkImportView.as_view(), name='parcel-bulk-import'),
     path('parcels/import-images/', ParcelImagesZipImportView.as_view(), name='parcel-images-zip-import'),
+    path('parcels/imports/', ImportBatchListView.as_view(), name='parcel-imports-list'),
 
     # URL pour le groupage de colis
     path('parcels/group/', ParcelGroupView.as_view(), name='parcel-group'),
@@ -30,8 +32,4 @@ urlpatterns = [
     path('parcels/', ParcelListCreateView.as_view(), name='parcel-list-create'),
     path('parcels/<str:tracking_number>/', ParcelDetailView.as_view(), name='parcel-detail'),
     path('parcels/<str:tracking_number>/track/', ParcelTrackView.as_view(), name='parcel-track'),
-
-    # URLs pour les groupages (Consolidation) - Commentées car les vues n'existent pas encore
-    # path('groups/', ConsolidationListCreateView.as_view(), name='consolidation-list-create'),
-    # path('groups/<int:pk>/', ConsolidationDetailView.as_view(), name='consolidation-detail'),
 ]
