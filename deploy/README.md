@@ -18,8 +18,9 @@ Steps:
 2. Create `.env` from `.env.example` and set at least:
    - `DEBUG=False`
    - `ALLOWED_HOSTS=your.domain.com,127.0.0.1,localhost`
-   - `CORS_ALLOW_ALL_ORIGINS=False` (or True for quick testing)
-3. Run:
+   - `PUBLIC_BASE_URL=https://your.domain.com`
+   - `SERVE_MEDIA=True` (secours images si le reverse proxy ne sert pas `/media/`)
+   - `CORS_ALLOW_ALL_ORIGINS=False` (or True for quick testing)3. Run:
    - `bash deploy/deploy_docker.sh`
 
 Notes:
@@ -58,4 +59,10 @@ Steps:
   - `python manage.py migrate`
 - If static files are missing:
   - `python manage.py collectstatic --noinput`
+- If **images / media return 404**:
+  1. Confirm files exist under `MEDIA_ROOT` (ex: `media/parcels/`, `media/orders/`).
+  2. Open in browser: `https://your.domain.com/media/parcels/xxx.jpg`
+  3. Prefer Nginx/Apache `location /media/` (see deploy configs).
+  4. Fallback: set `SERVE_MEDIA=True` and `PUBLIC_BASE_URL=https://your.domain.com` in `.env`, then restart Gunicorn.
+  5. WhiteNoise does **not** serve media — only `/static/`.
 

@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 
 from .models import Notification
 from .text_sanitizer import strip_emojis
+from parcels.media_urls import absolute_media_url
 
 User = get_user_model()
 
@@ -12,13 +13,11 @@ class NotificationSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
 
     def get_image(self, obj):
-        if not obj.image:
-            return None
-        request = self.context.get('request')
-        url = obj.image.url
-        if request is not None:
-            return request.build_absolute_uri(url)
-        return url
+        return absolute_media_url(
+            obj.image,
+            self.context.get('request'),
+            label=f'Notification #{obj.pk}',
+        )
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

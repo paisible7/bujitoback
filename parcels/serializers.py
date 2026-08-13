@@ -1,10 +1,7 @@
 from rest_framework import serializers
 from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
-import logging
-import os
-
-logger = logging.getLogger(__name__)
+from .media_urls import absolute_media_url
 
 class ParcelSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
@@ -27,52 +24,11 @@ class ParcelSerializer(serializers.ModelSerializer):
         return self._absolute_image_url(obj)
 
     def _absolute_image_url(self, obj):
-        if not obj.image:
-            logger.debug('Parcel #%s (%s): pas de champ image', obj.pk, obj.tracking_number)
-            return None
-
-        try:
-            relative = obj.image.url
-        except ValueError as exc:
-            logger.warning(
-                'Parcel #%s (%s): image.url inaccessible: %s',
-                obj.pk, obj.tracking_number, exc,
-            )
-            return None
-
-        try:
-            disk_path = obj.image.path
-            exists = os.path.exists(disk_path)
-            if not exists:
-                logger.warning(
-                    'Parcel #%s (%s): fichier manquant sur disque path=%s url=%s',
-                    obj.pk, obj.tracking_number, disk_path, relative,
-                )
-            else:
-                logger.debug(
-                    'Parcel #%s (%s): image OK path=%s url=%s',
-                    obj.pk, obj.tracking_number, disk_path, relative,
-                )
-        except Exception as exc:
-            logger.warning(
-                'Parcel #%s (%s): impossible de résoudre image.path: %s (url=%s)',
-                obj.pk, obj.tracking_number, exc, relative,
-            )
-
-        request = self.context.get('request')
-        if request is not None:
-            absolute = request.build_absolute_uri(relative)
-            logger.info(
-                'Parcel #%s image URL absolue=%s (Host=%s)',
-                obj.pk, absolute, request.get_host(),
-            )
-            return absolute
-
-        logger.warning(
-            'Parcel #%s: pas de request dans le serializer, URL relative=%s',
-            obj.pk, relative,
+        return absolute_media_url(
+            obj.image,
+            self.context.get('request'),
+            label=f'Parcel #{obj.pk} ({obj.tracking_number})',
         )
-        return relative
 
 
 class OrderImageSerializer(serializers.ModelSerializer):
@@ -83,29 +39,11 @@ class OrderImageSerializer(serializers.ModelSerializer):
         fields = ('id', 'image', 'uploaded_at')
 
     def get_image(self, obj):
-        if not obj.image:
-            logger.debug('OrderImage #%s: pas d\'image', obj.pk)
-            return None
-        try:
-            relative = obj.image.url
-        except ValueError as exc:
-            logger.warning('OrderImage #%s: image.url inaccessible: %s', obj.pk, exc)
-            return None
-        try:
-            if not os.path.exists(obj.image.path):
-                logger.warning(
-                    'OrderImage #%s: fichier manquant path=%s url=%s',
-                    obj.pk, obj.image.path, relative,
-                )
-        except Exception as exc:
-            logger.warning('OrderImage #%s: path error: %s', obj.pk, exc)
-
-        request = self.context.get('request')
-        if request is not None:
-            absolute = request.build_absolute_uri(relative)
-            logger.info('OrderImage #%s URL absolue=%s', obj.pk, absolute)
-            return absolute
-        return relative
+        return absolute_media_url(
+            obj.image,
+            self.context.get('request'),
+            label=f'OrderImage #{obj.pk}',
+        )
 
 class OrderSerializer(serializers.ModelSerializer):
     parcels = ParcelSerializer(many=True, read_only=True)

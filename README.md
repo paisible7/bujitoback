@@ -51,6 +51,17 @@ API locale : `http://127.0.0.1:8000/api/`
 
 ---
 
-## Déploiement (rappel)
+## Media / images (prod)
 
-Voir aussi `deploy/` (scripts + nginx). En prod : `migrate`, servir `/media/` et `/static/` via Nginx, puis éventuellement `seed_data` si besoin de comptes de démo.
+WhiteNoise sert uniquement `/static/`, **pas** `/media/`.
+
+Dans `.env` prod :
+
+```env
+PUBLIC_BASE_URL=https://apibudig.capslockdev.com
+SERVE_MEDIA=True
+```
+
+Puis redémarrer Gunicorn. Idéalement Nginx doit aussi avoir `location /media/`.
+
+Test navigateur : `https://apibudig.capslockdev.com/media/parcels/NOM.jpg` → doit répondre 200.

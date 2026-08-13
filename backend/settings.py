@@ -146,12 +146,27 @@ LOCALE_PATHS = [
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
+# Slash initial obligatoire pour des URLs correctes derrière Nginx.
+STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
+# Uploads utilisateur (photos colis / commandes / notifs).
+# WhiteNoise NE sert PAS les fichiers media — uniquement le static.
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Derrière Nginx / reverse proxy HTTPS
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# URL publique absolue (ex: https://apibudig.capslockdev.com) pour construire
+# les liens media si le Host/proxy est incorrect.
+PUBLIC_BASE_URL = env('PUBLIC_BASE_URL', default='').rstrip('/')
+
+# Servir /media/ via Django même si DEBUG=False (secours si Nginx n'a pas
+# encore le location /media/). Préférer Nginx en prod quand possible.
+SERVE_MEDIA = env.bool('SERVE_MEDIA', default=True)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/6.0/ref/settings/#default-auto-field
