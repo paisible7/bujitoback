@@ -15,6 +15,13 @@ class Order(models.Model):
     order_date = models.DateTimeField(auto_now_add=True, verbose_name=_("Date de commande"))
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name=_("Statut"))
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, verbose_name=_("Montant total"))
+    withdrawal_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        verbose_name=_("Frais de retrait"),
+    )
+    quote_ready = models.BooleanField(default=False, verbose_name=_("Devis établi"))
 
     # Détails de la demande produit (côté client)
     client_name = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("Nom client"))
@@ -50,11 +57,11 @@ class OrderImage(models.Model):
 class Parcel(models.Model):
     PARCEL_STATUS_CHOICES = [
         ('pending', _('En attente')),
+        ('consolidated', _('Groupé')),
         ('in_transit', _('En transit')),
         ('out_for_delivery', _('En cours de livraison')),
         ('delivered', _('Livré')),
         ('exception', _('Exception')),
-        ('consolidated', _('Consolidé')),
     ]
 
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='parcels', null=True, blank=True, verbose_name=_("Commande"))
@@ -92,6 +99,11 @@ class Consolidation(models.Model):
     parcels = models.ManyToManyField(Parcel, related_name='consolidations', verbose_name=_("Colis"))
     request_date = models.DateTimeField(auto_now_add=True, verbose_name=_("Date de demande"))
     status = models.CharField(max_length=20, choices=CONSOLIDATION_STATUS_CHOICES, default='pending', verbose_name=_("Statut"))
+    admin_note = models.TextField(
+        blank=True,
+        default='',
+        verbose_name=_("Note admin (groupage)"),
+    )
 
     class Meta:
         ordering = ['-request_date']

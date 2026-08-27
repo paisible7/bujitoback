@@ -7,6 +7,8 @@ This repo supports two simple deployment styles:
 
 Pick one and stick to it.
 
+**Checklist complète :** voir [`PRODUCTION.md`](./PRODUCTION.md)
+
 ## 1) Docker Compose (recommended)
 
 Prereqs on VPS:
@@ -20,7 +22,8 @@ Steps:
    - `ALLOWED_HOSTS=your.domain.com,127.0.0.1,localhost`
    - `PUBLIC_BASE_URL=https://your.domain.com`
    - `SERVE_MEDIA=True` (secours images si le reverse proxy ne sert pas `/media/`)
-   - `CORS_ALLOW_ALL_ORIGINS=False` (or True for quick testing)3. Run:
+   - `CORS_ALLOW_ALL_ORIGINS=False` (or True for quick testing)
+3. Run:
    - `bash deploy/deploy_docker.sh`
 
 Notes:
@@ -65,4 +68,3 @@ Steps:
   3. Prefer Nginx/Apache `location /media/` (see deploy configs).
   4. Fallback: set `SERVE_MEDIA=True` and `PUBLIC_BASE_URL=https://your.domain.com` in `.env`, then restart Gunicorn.
   5. WhiteNoise does **not** serve media — only `/static/`.
-

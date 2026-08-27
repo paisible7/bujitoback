@@ -13,6 +13,7 @@ from .serializers import (
     OrderSerializer,
     ParcelSerializer,
     OrderCreateSerializer,
+    OrderQuoteSerializer,
     ConsolidationSerializer,
     ConsolidationCreateSerializer,
     ConsolidationUpdateSerializer,
@@ -68,8 +69,31 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
             self.permission_denied(self.request)
         return obj
 
+    def get_serializer_class(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            data = self.request.data
+            # Devis admin : product_items + withdrawal_fee
+            if 'product_items' in data or 'withdrawal_fee' in data:
+                return OrderQuoteSerializer
+        return OrderSerializer
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer_class = self.get_serializer_class()
+
+        if serializer_class is OrderQuoteSerializer:
+            serializer = OrderQuoteSerializer(instance, data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            order = serializer.save()
+            return Response(OrderSerializer(order, context={'request': request}).data)
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(OrderSerializer(instance, context={'request': request}).data)
+
     def perform_update(self, serializer):
-        # Admin peut surtout changer le statut (et éventuellement le montant)
         serializer.save()
 
 class ParcelListCreateView(generics.ListCreateAPIView):
@@ -135,7 +159,7 @@ class ParcelGroupView(APIView):
         tracking_numbers = serializer.validated_data['tracking_numbers']
 
         user = request.user
-        eligible_statuses = ['pending', 'in_transit'] # Statuts éligibles au groupage
+        eligible_statuses = ['pending']  # Uniquement « en attente » avant groupage
 
         with transaction.atomic():
             parcels_to_group = []
@@ -149,7 +173,7 @@ class ParcelGroupView(APIView):
                         )
                     if parcel.status not in eligible_statuses:
                         return Response(
-                            {"detail": f"Le colis {tn} n'est pas dans un statut éligible au groupage (doit être 'En attente' ou 'En transit')."},
+                            {"detail": f"Le colis {tn} n'est pas éligible au groupage (doit être « En attente »)."},
                             status=status.HTTP_400_BAD_REQUEST
                         )
                     already_grouped = Consolidation.objects.filter(

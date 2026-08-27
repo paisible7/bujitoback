@@ -2,6 +2,13 @@ from rest_framework import serializers
 from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
+from .quote_utils import (
+    parse_product_items,
+    dump_product_items,
+    normalize_incoming_links,
+    compute_quote_total,
+    total_items_quantity,
+)
 
 class ParcelSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
@@ -51,29 +58,35 @@ class OrderSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source='user.email', read_only=True)
     user_full_name = serializers.CharField(source='user.full_name', read_only=True)
     product_links_list = serializers.SerializerMethodField()
+    product_items = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = (
             'id', 'user', 'user_email', 'user_full_name', 'order_date', 'status',
-            'total_amount', 'client_name', 'client_phone', 'country', 'city',
-            'product_links', 'product_links_list', 'quantity', 'comment',
+            'total_amount', 'withdrawal_fee', 'quote_ready',
+            'client_name', 'client_phone', 'country', 'city',
+            'product_links', 'product_links_list', 'product_items',
+            'quantity', 'comment',
             'parcels', 'images',
         )
-        read_only_fields = ('user', 'order_date')
+        read_only_fields = ('user', 'order_date', 'total_amount', 'quote_ready')
+
+    def get_product_items(self, obj):
+        items = parse_product_items(obj.product_links)
+        result = []
+        for item in items:
+            price = item.get('price')
+            qty = int(item.get('quantity') or 1)
+            result.append({
+                'url': item['url'],
+                'price': float(price) if price is not None else None,
+                'quantity': qty if qty > 0 else 1,
+            })
+        return result
 
     def get_product_links_list(self, obj):
-        raw = obj.product_links
-        if not raw:
-            return []
-        try:
-            import json
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                return [str(x) for x in parsed]
-        except Exception:
-            pass
-        return [line.strip() for line in str(raw).splitlines() if line.strip()]
+        return [item['url'] for item in parse_product_items(obj.product_links)]
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):
@@ -91,21 +104,78 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             'total_amount', 'status', 'client_name', 'client_phone',
             'country', 'city', 'product_links', 'quantity', 'comment',
         ]
-        extra_kwargs = {'status': {'required': False}}
+        extra_kwargs = {
+            'status': {'required': False},
+            'total_amount': {'required': False},
+        }
 
     def create(self, validated_data):
-        import json
         links = validated_data.pop('product_links', None)
-        if links is not None and not isinstance(links, str):
-            validated_data['product_links'] = json.dumps(links, ensure_ascii=False)
-        elif isinstance(links, str):
-            # Multipart peut envoyer une string JSON
-            try:
-                parsed = json.loads(links)
-                validated_data['product_links'] = json.dumps(parsed, ensure_ascii=False) if not isinstance(parsed, str) else links
-            except Exception:
-                validated_data['product_links'] = links
+        items = normalize_incoming_links(links)
+        validated_data['product_links'] = dump_product_items(items)
+        validated_data['quantity'] = total_items_quantity(items)
+        validated_data['total_amount'] = 0
+        validated_data['withdrawal_fee'] = 0
+        validated_data['quote_ready'] = False
+        if 'status' not in validated_data:
+            validated_data['status'] = 'pending'
         return super().create(validated_data)
+
+
+class OrderQuoteSerializer(serializers.Serializer):
+    """Admin : prix unitaire par lien + frais de retrait → total recalculé."""
+    product_items = serializers.ListField(
+        child=serializers.DictField(),
+        allow_empty=False,
+    )
+    withdrawal_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    status = serializers.ChoiceField(
+        choices=['pending', 'processing', 'shipped', 'delivered', 'cancelled'],
+        required=False,
+    )
+
+    def validate_product_items(self, value):
+        cleaned = []
+        for entry in value:
+            url = str(entry.get('url') or '').strip()
+            if not url:
+                raise serializers.ValidationError("Chaque item doit avoir une URL.")
+            price = entry.get('price')
+            if price is None or price == '':
+                raise serializers.ValidationError(
+                    f"Indiquez un prix pour le lien : {url}"
+                )
+            try:
+                from decimal import Decimal
+                price_dec = Decimal(str(price))
+            except Exception as exc:
+                raise serializers.ValidationError(f"Prix invalide pour {url}") from exc
+            if price_dec < 0:
+                raise serializers.ValidationError(f"Prix négatif interdit pour {url}")
+            try:
+                qty = int(entry.get('quantity', 1))
+            except (TypeError, ValueError):
+                qty = 1
+            if qty < 1:
+                qty = 1
+            cleaned.append({'url': url, 'price': price_dec, 'quantity': qty})
+        return cleaned
+
+    def update(self, instance, validated_data):
+        items = validated_data['product_items']
+        fee = validated_data['withdrawal_fee']
+        instance.product_links = dump_product_items(items)
+        instance.withdrawal_fee = fee
+        instance.total_amount = compute_quote_total(items, fee)
+        instance.quantity = total_items_quantity(items)
+        instance.quote_ready = True
+        if 'status' in validated_data:
+            instance.status = validated_data['status']
+        elif instance.status == 'pending':
+            instance.status = 'processing'
+        instance.save()
+        return instance
+
 
 from django.utils.translation import gettext as _
 
@@ -117,7 +187,7 @@ class ConsolidationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Consolidation
-        fields = ('id', 'group_name', 'user', 'parcels', 'request_date', 'created_at', 'status')
+        fields = ('id', 'group_name', 'user', 'parcels', 'request_date', 'created_at', 'status', 'admin_note')
         read_only_fields = ('user', 'request_date', 'status')
 
     def get_group_name(self, obj):
@@ -155,10 +225,11 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         choices=['pending', 'accepted', 'rejected'],
         required=False,
     )
+    admin_note = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
         model = Consolidation
-        fields = ('status', 'parcel_id', 'decision')
+        fields = ('status', 'parcel_id', 'decision', 'admin_note')
 
     def validate_status(self, value):
         allowed = {'processing', 'completed', 'cancelled'}
@@ -190,6 +261,13 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
             if not self.instance.parcels.filter(pk=attrs['parcel_id']).exists():
                 raise serializers.ValidationError("Ce colis ne fait pas partie de ce groupage.")
 
+        if attrs.get('status') == 'completed':
+            note = (attrs.get('admin_note') or '').strip()
+            if not note:
+                raise serializers.ValidationError(
+                    {"admin_note": "Ajoutez une note descriptive pour notifier le client."}
+                )
+
         return attrs
 
     def update(self, instance, validated_data):
@@ -198,6 +276,7 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         parcel_id = validated_data.pop('parcel_id', None)
         decision = validated_data.pop('decision', None)
         new_status = validated_data.get('status')
+        admin_note = validated_data.get('admin_note')
 
         with transaction.atomic():
             if parcel_id is not None and decision is not None:
@@ -206,6 +285,9 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                     parcel_id=parcel_id,
                     defaults={'decision': decision},
                 )
+
+            if admin_note is not None:
+                instance.admin_note = admin_note.strip()
 
             if new_status is not None:
                 instance.status = new_status
@@ -227,5 +309,7 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                                 consolidation=instance,
                                 parcel=parcel,
                             ).delete()
+            elif admin_note is not None:
+                instance.save(update_fields=['admin_note'])
 
         return instance

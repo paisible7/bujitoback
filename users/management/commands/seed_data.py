@@ -290,7 +290,7 @@ class Command(BaseCommand):
                         f'parcels/{tracking.lower()}{src.suffix}',
                     )
                 parcel_counter += 1
-                if p_status in ('pending', 'in_transit'):
+                if p_status == 'pending':
                     groupable.append(parcel)
 
         # --- Groupages : 1 pending + 1 completed ---

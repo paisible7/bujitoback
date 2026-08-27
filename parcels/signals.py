@@ -115,22 +115,53 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
         return
 
     if instance.status == "completed":
+        note = (instance.admin_note or "").strip()
+        decisions = {
+            d.parcel_id: d.decision
+            for d in instance.parcel_decisions.all()
+        }
+        accepted = []
+        for p in instance.parcels.all():
+            if decisions.get(p.id, "accepted") == "rejected":
+                continue
+            accepted.append(p.tracking_number or str(p.pk))
+        tracking_list = ", ".join(accepted) if accepted else "—"
+        body = (
+            f"Votre groupage #{instance.pk} a ete accepte. "
+            f"Colis groups: {tracking_list}."
+        )
+        if note:
+            body = f"{body} Note: {note}"
         send_fcm_notification(
             user,
             "Groupage accepte",
-            f"Votre groupage #{instance.pk} a ete accepte. Vos colis seront expedies prochainement.",
+            body,
             type="consolidation",
             reference_id=instance.pk,
-            data={"type": "consolidation", "reference_id": instance.pk, "status": "completed"},
+            data={
+                "type": "consolidation",
+                "reference_id": instance.pk,
+                "status": "completed",
+                "admin_note": note,
+            },
         )
     elif instance.status == "cancelled":
+        note = (instance.admin_note or "").strip()
+        body = f"Votre demande de groupage #{instance.pk} a ete refusee."
+        if note:
+            body = f"{body} Note: {note}"
         send_fcm_notification(
             user,
             "Groupage refuse",
-            f"Votre demande de groupage #{instance.pk} a ete refusee.",
+            body,
             type="consolidation",
             reference_id=instance.pk,
-            data={"type": "consolidation", "reference_id": instance.pk, "status": "cancelled"},
+            data={
+                "type": "consolidation",
+                "reference_id": instance.pk,
+                "status": "cancelled",
+                "admin_note": note,
+            },
         )
     elif instance.status == "processing":
         send_fcm_notification(
