@@ -2,12 +2,85 @@
 
 Domaine API : `https://apibudig.capslockdev.com`
 
-## A. Backend (VPS)
+## A. CI/CD GitHub Actions (déploiement auto)
+
+À chaque push sur `main`, GitHub lance les tests puis, si activé, se connecte
+en SSH au serveur, fait `git pull`, `migrate`, `collectstatic` et redémarre.
+
+### 1. Une fois sur le serveur (SSH)
+
+Le clone dans `public_html` reste. Vérifie que `git pull` marche déjà :
+
+```bash
+cd ~/public_html   # ou le vrai chemin du clone (ex. ~/public_html/bujitoback)
+git status
+git pull
+```
+
+Crée une clé **uniquement pour le deploy** (sur ta machine Windows) :
+
+```powershell
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\bujito_deploy -N ""
+```
+
+Ajoute la **clé publique** sur le serveur (`~/.ssh/authorized_keys`) :
+
+```powershell
+type $env:USERPROFILE\.ssh\bujito_deploy.pub
+```
+
+Puis en SSH sur le serveur :
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+echo "COLLER_LA_LIGNE_PUB_ICI" >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Test :
+
+```powershell
+ssh -i $env:USERPROFILE\.ssh\bujito_deploy USER@HOST "cd CHEMIN && git rev-parse --short HEAD"
+```
+
+### 2. Secrets GitHub (repo `paisible7/bujitoback`)
+
+Settings → Secrets and variables → Actions → **Secrets** :
+
+| Secret | Exemple |
+|--------|---------|
+| `SSH_HOST` | `capslockdev.com` ou l’IP |
+| `SSH_USER` | utilisateur SSH cPanel / VPS |
+| `SSH_KEY` | contenu **privé** de `bujito_deploy` (tout le fichier, y compris BEGIN/END) |
+| `DEPLOY_PATH` | `/home/USER/public_html` (chemin exact du clone) |
+
+Le port SSH est `22` (cPanel). Pour un autre port, modifier `.github/workflows/deploy.yml`.
+
+Settings → Secrets and variables → Actions → **Variables** :
+
+| Variable | Valeur |
+|----------|--------|
+| `DEPLOY_ENABLED` | `true` |
+
+Sans `DEPLOY_ENABLED=true`, seuls les tests tournent (le deploy n’est pas lancé).
+
+Le `.env`, `db.sqlite3` et `media/` du serveur **ne sont pas** touchés (gitignored).
+
+### 3. Vérifier
+
+- Onglet **Actions** du repo : workflow `CI` + `Deploy production`
+- Ou **Run workflow** à la main (`workflow_dispatch`)
+
+---
+
+## B. Backend (manuel, si besoin)
 
 ### 1. Code
 ```bash
-cd /var/www/bujitodigital-backend   # adapter le chemin
+cd ~/public_html   # adapter le chemin
 git pull
+bash deploy/remote_update.sh --already-pulled
 ```
 
 ### 2. `.env` production (créer / mettre à jour)
@@ -26,13 +99,7 @@ PAYMENT_WEBHOOK_SECRET=<secret-fourni-au-prestataire>
 
 ### 3. Dépendances + migrate + static
 ```bash
-bash deploy/deploy_venv.sh /var/www/bujitodigital-backend
-# ou à la main :
-source venv/bin/activate
-pip install -r requirements.txt
-python manage.py migrate --noinput
-python manage.py collectstatic --noinput
-sudo systemctl restart bujitodigital-backend
+bash deploy/remote_update.sh
 ```
 
 Pour prévisualiser les anciennes commandes payées qui pourraient recevoir des
@@ -55,7 +122,7 @@ sudo chown -R www-data:www-data /var/www/bujitodigital-backend/media
 sudo chmod -R u+rwX /var/www/bujitodigital-backend/media
 ```
 
-## B. App Flutter
+## C. App Flutter
 
 1. `lib/services/api_endpoints.dart` → URL **prod** (déjà basculé)
 2. Build release :
@@ -64,7 +131,7 @@ sudo chmod -R u+rwX /var/www/bujitodigital-backend/media
 ```
 APK : `build\app\outputs\flutter-apk\app-release.apk`
 
-## C. Vérifications post-deploy
+## D. Vérifications post-deploy
 - [ ] Login admin / client OK
 - [ ] Images colis / commandes visibles
 - [ ] Import + upload image OK

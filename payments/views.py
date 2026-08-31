@@ -223,6 +223,8 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             if not phone_number:
                 return Response({"message": "phone_number is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        simulate_card = method_code == "card" and not is_transfer and order is not None
+
         with transaction.atomic():
             if order is not None:
                 order = Order.objects.select_for_update().get(pk=order.pk)
@@ -231,33 +233,79 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                         {"message": "Cette commande est déjà payée."},
                         status=status.HTTP_409_CONFLICT,
                     )
-                if order.payments.filter(status="pending").exists():
-                    return Response(
-                        {"message": "Un paiement est déjà en attente pour cette commande."},
-                        status=status.HTTP_409_CONFLICT,
+                pending_payment = (
+                    order.payments.filter(status="pending")
+                    .select_for_update()
+                    .first()
+                )
+                if pending_payment is not None:
+                    if not simulate_card:
+                        return Response(
+                            {
+                                "message": "Un paiement est déjà en attente pour cette commande.",
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    payment = pending_payment
+                    payment.method = method
+                    payment.phone_number = phone_number or payment.phone_number
+                else:
+                    payment = Payment.objects.create(
+                        user=request.user,
+                        order=order,
+                        amount=amount,
+                        currency="XOF" if is_transfer else "USD",
+                        method=method,
+                        reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
+                        status="pending",
+                        phone_number=phone_number or None,
+                        provider_raw_response=meta,
                     )
+            else:
+                payment = Payment.objects.create(
+                    user=request.user,
+                    order=order,
+                    amount=amount,
+                    currency="XOF" if is_transfer else "USD",
+                    method=method,
+                    reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
+                    status="pending",
+                    phone_number=phone_number or None,
+                    provider_raw_response=meta,
+                )
 
-            payment = Payment.objects.create(
-                user=request.user,
-                order=order,
-                amount=amount,
-                currency="XOF" if is_transfer else "USD",
-                method=method,
-                reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
-                status="pending",
-                phone_number=phone_number or None,
-                provider_raw_response=meta,
+        if simulate_card:
+            raw = payment.provider_raw_response or {}
+            if not isinstance(raw, dict):
+                raw = {"previous": raw}
+            raw.update({"simulated": True, "method": "card"})
+            payment.status = "completed"
+            payment.payment_url = None
+            payment.provider_raw_response = raw
+            payment.save(
+                update_fields=[
+                    "method",
+                    "phone_number",
+                    "status",
+                    "payment_url",
+                    "provider_raw_response",
+                    "updated_at",
+                ]
             )
+            checkout_url = None
+            message = "Paiement confirmé"
+        else:
+            checkout_url = PaymentService.initiate_payment(payment)
+            message = "Transfert initié" if is_transfer else "Paiement initialisé"
 
-        checkout_url = PaymentService.initiate_payment(payment)
-
+        payment.refresh_from_db()
         tx = PaymentSerializer(payment).data
         return Response(
             {
                 "transaction": tx,
                 "redirect_url": checkout_url,
                 "ussd_code": None,
-                "message": "Transfert initié" if is_transfer else "Paiement initialisé",
+                "message": message,
             },
             status=status.HTTP_200_OK,
         )
@@ -284,6 +332,20 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"])
     def history(self, request):
         payments = self.get_queryset().order_by("-created_at")
+        serializer = PaymentSerializer(payments, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"])
+    def manage(self, request):
+        if getattr(request.user, "role", None) != "admin":
+            return Response(
+                {"message": "Accès refusé"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        payments = (
+            Payment.objects.select_related("user", "order", "method")
+            .order_by("-created_at")
+        )
         serializer = PaymentSerializer(payments, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

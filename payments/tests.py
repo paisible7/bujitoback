@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from parcels.models import Order
 from users.models import CustomUser
@@ -39,12 +39,17 @@ class PaymentInitiationTests(APITestCase):
         return_value="https://checkout.example.test",
     )
     def test_quote_ready_order_can_only_have_one_pending_payment(self, _mock):
+        PaymentMethod.objects.create(name="Orange Money", code="orange_money", is_active=True)
         order = Order.objects.create(
             user=self.user,
             quote_ready=True,
             total_amount=Decimal("25.00"),
         )
-        payload = {"order_id": order.pk, "method": "card"}
+        payload = {
+            "order_id": order.pk,
+            "method": "orange_money",
+            "phone_number": "0700000000",
+        }
 
         first = self.client.post(reverse("payment-initiate"), payload)
         second = self.client.post(reverse("payment-initiate"), payload)
@@ -52,6 +57,77 @@ class PaymentInitiationTests(APITestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 409)
         self.assertEqual(Payment.objects.filter(order=order).count(), 1)
+        self.assertEqual(Payment.objects.get(order=order).status, "pending")
+
+    def test_card_payment_completes_in_app_without_redirect(self):
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("25.00"),
+        )
+
+        response = self.client.post(
+            reverse("payment-initiate"),
+            {"order_id": order.pk, "method": "card"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload.get("redirect_url"))
+        self.assertEqual(payload["transaction"]["status"], "completed")
+        self.assertEqual(Payment.objects.get(order=order).status, "completed")
+
+    def test_card_payment_completes_existing_pending_payment(self):
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("25.00"),
+        )
+        Payment.objects.create(
+            user=self.user,
+            order=order,
+            amount=Decimal("25.00"),
+            currency="USD",
+            reference="PAY-STUCK-PENDING",
+            method=self.method,
+            status="pending",
+        )
+
+        response = self.client.post(
+            reverse("payment-initiate"),
+            {"order_id": order.pk, "method": "card"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 1)
+        self.assertEqual(Payment.objects.get(order=order).status, "completed")
+
+    def test_client_cannot_list_all_payments(self):
+        response = self.client.get(reverse("payment-manage"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_list_all_payments(self):
+        admin = CustomUser.objects.create_user(
+            email="admin-pay@example.com",
+            password="test-password",
+            role="admin",
+        )
+        Payment.objects.create(
+            user=self.user,
+            amount=Decimal("25.00"),
+            currency="USD",
+            reference="PAY-ADMIN-LIST",
+            method=self.method,
+            status="completed",
+        )
+        self.client.force_authenticate(admin)
+
+        response = self.client.get(reverse("payment-manage"))
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["user_email"], self.user.email)
 
     def test_order_without_quote_cannot_be_paid(self):
         order = Order.objects.create(user=self.user)
@@ -119,6 +195,26 @@ class PaymentCompletionSignalTests(TransactionTestCase):
 
         self.assertEqual(order.parcels.count(), 2)
         payment.save(update_fields=["status", "updated_at"])
+        self.assertEqual(order.parcels.count(), 2)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "processing")
+
+    def test_card_initiate_provisions_parcels(self):
+        client = APIClient()
+        client.force_authenticate(self.user)
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("40.00"),
+            expected_parcel_count=2,
+        )
+
+        response = client.post(
+            reverse("payment-initiate"),
+            {"order_id": order.pk, "method": "card"},
+        )
+
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(order.parcels.count(), 2)
         order.refresh_from_db()
         self.assertEqual(order.status, "processing")

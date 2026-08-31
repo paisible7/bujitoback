@@ -1,8 +1,11 @@
-# Deployment (VPS)
+# Deployment
 
-This repo supports two simple deployment styles:
+**Déploiement automatique :** GitHub Actions → SSH → `git pull` sur le serveur.
+Voir [`PRODUCTION.md`](./PRODUCTION.md) section A (secrets `SSH_HOST`, `SSH_USER`, `SSH_KEY`, `DEPLOY_PATH` + variable `DEPLOY_ENABLED=true`).
 
-1) Docker Compose (recommended if Docker is available on the VPS)
+This repo also supports two manual styles:
+
+1) Docker Compose (if Docker is available on the VPS)
 2) Systemd + venv + Gunicorn (no Docker)
 
 Pick one and stick to it.

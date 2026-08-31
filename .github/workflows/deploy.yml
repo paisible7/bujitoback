@@ -1,0 +1,66 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DEBUG: "True"
+      SECRET_KEY: ci-test-secret-not-for-production
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      CORS_ALLOW_ALL_ORIGINS: "True"
+      PAYMENT_WEBHOOK_SECRET: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Django tests
+        run: python manage.py test --verbosity=1
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script_stop: true
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git fetch origin
+            git checkout main
+            git pull --ff-only origin main
+            bash deploy/remote_update.sh --already-pulled
+
+      - name: Health check
+        run: |
+          url="https://apibudig.capslockdev.com/api/"
+          echo "Checking $url"
+          code="$(curl -sS -o /dev/null -w "%{http_code}" --max-time 30 "$url" || true)"
+          echo "HTTP $code"
+          if [ -z "$code" ] || [ "$code" = "000" ]; then
+            echo "API unreachable"
+            exit 1
+          fi

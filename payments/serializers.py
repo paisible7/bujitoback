@@ -15,6 +15,8 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
 class PaymentSerializer(serializers.ModelSerializer):
     method = serializers.SerializerMethodField()
     redirect_url = serializers.ReadOnlyField(source='payment_url')
+    user_email = serializers.SerializerMethodField()
+    client_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
@@ -28,9 +30,18 @@ class PaymentSerializer(serializers.ModelSerializer):
             'created_at',
             'reference',
             'redirect_url',
+            'user_email',
+            'client_name',
         ]
         read_only_fields = ['reference', 'status', 'created_at']
 
     def get_method(self, obj):
         # Flutter expects a string value like 'orange_money', not the FK id.
         return getattr(obj.method, 'code', None) or ''
+
+    def get_user_email(self, obj):
+        return getattr(obj.user, 'email', None)
+
+    def get_client_name(self, obj):
+        name = (getattr(obj.user, 'full_name', '') or '').strip()
+        return name or getattr(obj.user, 'email', '')
