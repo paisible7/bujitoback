@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils.translation import gettext_lazy as _
 from users.models import CustomUser
 
@@ -22,6 +23,11 @@ class Order(models.Model):
         verbose_name=_("Frais de retrait"),
     )
     quote_ready = models.BooleanField(default=False, verbose_name=_("Devis établi"))
+    expected_parcel_count = models.PositiveSmallIntegerField(
+        default=1,
+        validators=[MinValueValidator(1), MaxValueValidator(100)],
+        verbose_name=_("Nombre de colis prévus"),
+    )
 
     # Détails de la demande produit (côté client)
     client_name = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("Nom client"))
@@ -56,7 +62,8 @@ class OrderImage(models.Model):
 
 class Parcel(models.Model):
     PARCEL_STATUS_CHOICES = [
-        ('pending', _('En attente')),
+        ('awaiting_arrival', _("En attente d'arrivée")),
+        ('pending', _("Arrivé à l'entrepôt")),
         ('consolidated', _('Groupé')),
         ('in_transit', _('En transit')),
         ('out_for_delivery', _('En cours de livraison')),
@@ -65,7 +72,19 @@ class Parcel(models.Model):
     ]
 
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='parcels', null=True, blank=True, verbose_name=_("Commande"))
+    order_sequence = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("Numéro de colis dans la commande"),
+    )
     tracking_number = models.CharField(max_length=100, unique=True, null=True, blank=True, verbose_name=_("Numéro de suivi"))
+    supplier_tracking_number = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        db_index=True,
+        verbose_name=_("Numéro de suivi fournisseur"),
+    )
     status = models.CharField(max_length=20, choices=PARCEL_STATUS_CHOICES, default='pending', verbose_name=_("Statut"))
     current_location = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("Emplacement actuel"))
 
@@ -83,9 +102,15 @@ class Parcel(models.Model):
         ordering = ['-last_updated']
         verbose_name = _("Colis")
         verbose_name_plural = _("Colis")
+        constraints = [
+            models.UniqueConstraint(
+                fields=['order', 'order_sequence'],
+                name='unique_parcel_sequence_per_order',
+            ),
+        ]
 
     def __str__(self):
-        return self.tracking_number
+        return self.tracking_number or f"Parcel {self.pk}"
 
 class Consolidation(models.Model):
     CONSOLIDATION_STATUS_CHOICES = [

@@ -3,6 +3,7 @@ import hashlib
 import uuid
 
 from django.conf import settings
+from django.db import transaction
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -63,8 +64,9 @@ def _verify_webhook_signature(request) -> bool:
     secret = getattr(settings, "PAYMENT_WEBHOOK_SECRET", "") or ""
     secret = secret.strip()
     if not secret:
-        # If no secret configured, do not block (dev), but not secure for prod.
-        return True
+        # Autorisé uniquement en développement. En production, un webhook
+        # non signé ne doit jamais pouvoir confirmer un paiement.
+        return bool(settings.DEBUG)
 
     sig = (
         request.headers.get("X-Payment-Signature")
@@ -194,8 +196,21 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             except Exception:
                 return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            if order.status.lower() != "pending":
-                return Response({"message": "Order is not pending"}, status=status.HTTP_400_BAD_REQUEST)
+            if order.status.lower() not in {"pending", "processing"}:
+                return Response(
+                    {"message": "Cette commande n'est plus payable."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not order.quote_ready or order.total_amount <= 0:
+                return Response(
+                    {"message": "Le devis n'est pas encore prêt."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if order.payments.filter(status="completed").exists():
+                return Response(
+                    {"message": "Cette commande est déjà payée."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             amount = order.total_amount
 
         if method_code in {"orange_money", "mtn_momo", "wave", "moov"} and not phone_number:
@@ -208,17 +223,31 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             if not phone_number:
                 return Response({"message": "phone_number is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        payment = Payment.objects.create(
-            user=request.user,
-            order=order,
-            amount=amount,
-            currency="XOF",
-            method=method,
-            reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
-            status="pending",
-            phone_number=phone_number or None,
-            provider_raw_response=meta,
-        )
+        with transaction.atomic():
+            if order is not None:
+                order = Order.objects.select_for_update().get(pk=order.pk)
+                if order.payments.filter(status="completed").exists():
+                    return Response(
+                        {"message": "Cette commande est déjà payée."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if order.payments.filter(status="pending").exists():
+                    return Response(
+                        {"message": "Un paiement est déjà en attente pour cette commande."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+            payment = Payment.objects.create(
+                user=request.user,
+                order=order,
+                amount=amount,
+                currency="XOF" if is_transfer else "USD",
+                method=method,
+                reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
+                status="pending",
+                phone_number=phone_number or None,
+                provider_raw_response=meta,
+            )
 
         checkout_url = PaymentService.initiate_payment(payment)
 
@@ -272,26 +301,34 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if not reference:
             return Response({"message": "Missing reference"}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            payment = Payment.objects.get(reference=reference)
-        except Payment.DoesNotExist:
-            return Response({"message": "Paiement non trouvé"}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            try:
+                payment = Payment.objects.select_for_update().get(
+                    reference=reference,
+                )
+            except Payment.DoesNotExist:
+                return Response(
+                    {"message": "Paiement non trouvé"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
-        # Map provider status to internal status.
-        new_status = None
-        if status_received in {"success", "completed", "paid"}:
-            new_status = "completed"
-        elif status_received in {"failed", "error"}:
-            new_status = "failed"
-        elif status_received in {"cancelled", "canceled"}:
-            new_status = "cancelled"
+            # Map provider status to internal status.
+            new_status = None
+            if status_received in {"success", "completed", "paid"}:
+                new_status = "completed"
+            elif status_received in {"failed", "error"}:
+                new_status = "failed"
+            elif status_received in {"cancelled", "canceled"}:
+                new_status = "cancelled"
 
-        if new_status and payment.status != new_status:
-            payment.status = new_status
-            payment.updated_at = timezone.now()
+            if new_status and payment.status != new_status:
+                payment.status = new_status
+                payment.updated_at = timezone.now()
 
-        payment.provider_raw_response = data
-        payment.save(update_fields=["status", "provider_raw_response", "updated_at"])
+            payment.provider_raw_response = data
+            payment.save(
+                update_fields=["status", "provider_raw_response", "updated_at"],
+            )
 
         return Response({"status": "received"}, status=status.HTTP_200_OK)
 

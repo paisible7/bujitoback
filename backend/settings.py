@@ -53,7 +53,7 @@ INSTALLED_APPS = [
     'users',
     'parcels.apps.ParcelsConfig',
     'notifications',
-    'payments',
+    'payments.apps.PaymentsConfig',
     'orders',
 ]
 

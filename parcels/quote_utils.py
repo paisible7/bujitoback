@@ -25,8 +25,9 @@ def _to_qty(value) -> int:
 
 def parse_product_items(raw: str | None) -> list[dict[str, Any]]:
     """
-    Normalise product_links en liste de {url, price, quantity}.
+    Normalise product_links en liste de {url, description, price, quantity}.
     Accepte : JSON liste de strings, JSON liste d'objets, texte multiligne.
+    Une ligne issue d'une photo peut avoir une description sans URL.
     """
     if not raw:
         return []
@@ -46,10 +47,12 @@ def parse_product_items(raw: str | None) -> list[dict[str, Any]]:
                     items.append({'url': url, 'price': None, 'quantity': 1})
             elif isinstance(entry, dict):
                 url = str(entry.get('url') or entry.get('link') or '').strip()
-                if not url:
+                description = str(entry.get('description') or entry.get('label') or '').strip()
+                if not url and not description:
                     continue
                 items.append({
                     'url': url,
+                    'description': description,
                     'price': _to_decimal(entry.get('price')),
                     'quantity': _to_qty(entry.get('quantity', 1)),
                 })
@@ -66,11 +69,16 @@ def dump_product_items(items: list[dict[str, Any]]) -> str:
     serializable = []
     for item in items:
         url = str(item.get('url') or '').strip()
-        if not url:
+        description = str(item.get('description') or item.get('label') or '').strip()
+        if not url and not description:
             continue
         qty = _to_qty(item.get('quantity', 1))
         price = item.get('price')
-        entry = {'url': url, 'quantity': qty}
+        entry = {'quantity': qty}
+        if url:
+            entry['url'] = url
+        if description:
+            entry['description'] = description
         if price is None or price == '':
             entry['price'] = None
         else:

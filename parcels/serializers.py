@@ -13,14 +13,16 @@ from .quote_utils import (
 class ParcelSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     package_photo = serializers.SerializerMethodField()
+    user_email = serializers.SerializerMethodField()
 
     class Meta:
         model = Parcel
         fields = [
-            'id', 'tracking_number', 'status', 'current_location',
+            'id', 'tracking_number', 'supplier_tracking_number',
+            'order_sequence', 'status', 'current_location',
             'client_name', 'client_phone', 'weight_volume',
             'warehouse_number', 'description', 'image', 'package_photo',
-            'last_updated', 'order',
+            'last_updated', 'order', 'user_email',
         ]
         read_only_fields = ('last_updated',)
 
@@ -29,6 +31,11 @@ class ParcelSerializer(serializers.ModelSerializer):
 
     def get_package_photo(self, obj):
         return self._absolute_image_url(obj)
+
+    def get_user_email(self, obj):
+        if obj.order_id and obj.order:
+            return obj.order.user.email
+        return None
 
     def _absolute_image_url(self, obj):
         return absolute_media_url(
@@ -59,18 +66,26 @@ class OrderSerializer(serializers.ModelSerializer):
     user_full_name = serializers.CharField(source='user.full_name', read_only=True)
     product_links_list = serializers.SerializerMethodField()
     product_items = serializers.SerializerMethodField()
+    payment_completed = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = (
             'id', 'user', 'user_email', 'user_full_name', 'order_date', 'status',
             'total_amount', 'withdrawal_fee', 'quote_ready',
+            'expected_parcel_count', 'payment_completed',
             'client_name', 'client_phone', 'country', 'city',
             'product_links', 'product_links_list', 'product_items',
             'quantity', 'comment',
             'parcels', 'images',
         )
-        read_only_fields = ('user', 'order_date', 'total_amount', 'quote_ready')
+        read_only_fields = (
+            'user',
+            'order_date',
+            'total_amount',
+            'quote_ready',
+            'expected_parcel_count',
+        )
 
     def get_product_items(self, obj):
         items = parse_product_items(obj.product_links)
@@ -79,14 +94,22 @@ class OrderSerializer(serializers.ModelSerializer):
             price = item.get('price')
             qty = int(item.get('quantity') or 1)
             result.append({
-                'url': item['url'],
+                'url': item.get('url', ''),
+                'description': item.get('description', ''),
                 'price': float(price) if price is not None else None,
                 'quantity': qty if qty > 0 else 1,
             })
         return result
 
     def get_product_links_list(self, obj):
-        return [item['url'] for item in parse_product_items(obj.product_links)]
+        return [
+            item.get('url', '')
+            for item in parse_product_items(obj.product_links)
+            if item.get('url')
+        ]
+
+    def get_payment_completed(self, obj):
+        return obj.payments.filter(status='completed').exists()
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):
@@ -123,12 +146,13 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
 
 class OrderQuoteSerializer(serializers.Serializer):
-    """Admin : prix unitaire par lien + frais de retrait → total recalculé."""
+    """Admin : lignes du devis + frais de retrait → total recalculé."""
     product_items = serializers.ListField(
         child=serializers.DictField(),
         allow_empty=False,
     )
     withdrawal_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    expected_parcel_count = serializers.IntegerField(min_value=1, max_value=100)
     status = serializers.ChoiceField(
         choices=['pending', 'processing', 'shipped', 'delivered', 'cancelled'],
         required=False,
@@ -138,12 +162,15 @@ class OrderQuoteSerializer(serializers.Serializer):
         cleaned = []
         for entry in value:
             url = str(entry.get('url') or '').strip()
-            if not url:
-                raise serializers.ValidationError("Chaque item doit avoir une URL.")
+            description = str(entry.get('description') or '').strip()
+            if not url and not description:
+                raise serializers.ValidationError(
+                    "Chaque ligne doit avoir un lien ou une description."
+                )
             price = entry.get('price')
             if price is None or price == '':
                 raise serializers.ValidationError(
-                    f"Indiquez un prix pour le lien : {url}"
+                    f"Indiquez un prix pour la ligne : {description or url}"
                 )
             try:
                 from decimal import Decimal
@@ -158,12 +185,38 @@ class OrderQuoteSerializer(serializers.Serializer):
                 qty = 1
             if qty < 1:
                 qty = 1
-            cleaned.append({'url': url, 'price': price_dec, 'quantity': qty})
+            cleaned.append({
+                'url': url,
+                'description': description,
+                'price': price_dec,
+                'quantity': qty,
+            })
         return cleaned
+
+    def validate(self, attrs):
+        total = compute_quote_total(
+            attrs.get('product_items', []),
+            attrs.get('withdrawal_fee', 0),
+        )
+        if total <= 0:
+            raise serializers.ValidationError(
+                "Le montant total du devis doit être supérieur à zéro."
+            )
+        if self.instance is not None:
+            if self.instance.payments.filter(status='completed').exists():
+                raise serializers.ValidationError(
+                    "Ce devis ne peut plus être modifié après confirmation du paiement."
+                )
+            if self.instance.parcels.filter(order_sequence__isnull=False).exists():
+                raise serializers.ValidationError(
+                    "Les colis ont déjà été générés pour cette commande."
+                )
+        return attrs
 
     def update(self, instance, validated_data):
         items = validated_data['product_items']
         fee = validated_data['withdrawal_fee']
+        instance.expected_parcel_count = validated_data['expected_parcel_count']
         instance.product_links = dump_product_items(items)
         instance.withdrawal_fee = fee
         instance.total_amount = compute_quote_total(items, fee)
@@ -171,8 +224,6 @@ class OrderQuoteSerializer(serializers.Serializer):
         instance.quote_ready = True
         if 'status' in validated_data:
             instance.status = validated_data['status']
-        elif instance.status == 'pending':
-            instance.status = 'processing'
         instance.save()
         return instance
 

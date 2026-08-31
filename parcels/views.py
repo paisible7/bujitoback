@@ -33,9 +33,14 @@ class OrderListCreateView(generics.ListCreateAPIView):
         return OrderSerializer
 
     def get_queryset(self):
+        queryset = (
+            Order.objects.select_related('user')
+            .prefetch_related('parcels', 'images', 'payments')
+            .order_by('-order_date')
+        )
         if self.request.user.is_authenticated and self.request.user.role == 'admin':
-            return Order.objects.all()
-        return Order.objects.filter(user=self.request.user)
+            return queryset
+        return queryset.filter(user=self.request.user)
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -100,14 +105,20 @@ class ParcelListCreateView(generics.ListCreateAPIView):
     serializer_class = ParcelSerializer
     permission_classes = [IsAuthenticated] # IsAdminUser checks method, but we filter queryset
     filter_backends = [filters.SearchFilter]
-    search_fields = ['tracking_number', 'description', 'current_location']
+    search_fields = [
+        'tracking_number',
+        'supplier_tracking_number',
+        'description',
+        'current_location',
+    ]
 
     def get_queryset(self):
         if not self.request.user.is_authenticated:
             return Parcel.objects.none()
+        queryset = Parcel.objects.select_related('order__user')
         if self.request.user.role == 'admin':
-            return Parcel.objects.all()
-        return Parcel.objects.filter(order__user=self.request.user)
+            return queryset
+        return queryset.filter(order__user=self.request.user)
 
     def perform_create(self, serializer):
         # Still check for admin for POST via IsAdminUser if we use it,
@@ -256,8 +267,11 @@ class ParcelBulkImportView(APIView):
 
         with transaction.atomic():
             for data in parcels_data:
-                tracking = data.get('tracking_number')
-                if not tracking:
+                tracking = str(data.get('tracking_number') or '').strip()
+                supplier_tracking = str(
+                    data.get('supplier_tracking_number') or ''
+                ).strip()
+                if not tracking and not supplier_tracking:
                     continue
 
                 # Tenter de lier à un utilisateur via Email ou Téléphone
@@ -274,12 +288,24 @@ class ParcelBulkImportView(APIView):
 
                 # Optionnel : Associer à une commande existante
                 order_id = data.pop('order', None)
+                order_sequence = data.get('order_sequence')
+                try:
+                    order_sequence = int(order_sequence) if order_sequence else None
+                except (TypeError, ValueError):
+                    order_sequence = None
                 order = None
                 if order_id:
                     order = Order.objects.filter(id=order_id).first()
                 elif user:
                     # Si on a trouvé un utilisateur, on cherche sa dernière commande en attente
-                    order = Order.objects.filter(user=user, status='pending').first()
+                    order = (
+                        Order.objects.filter(
+                            user=user,
+                            status__in=['pending', 'processing'],
+                        )
+                        .order_by('-order_date')
+                        .first()
+                    )
 
                 try:
                     # Préparation des données de base
@@ -304,18 +330,46 @@ class ParcelBulkImportView(APIView):
                         except Exception as e:
                             errors.append(f"Image corrompue pour {tracking}: {str(e)}")
 
-                    parcel, created = Parcel.objects.update_or_create(
-                        tracking_number=tracking,
-                        defaults=defaults
-                    )
+                    parcel = None
+                    if tracking:
+                        parcel = Parcel.objects.filter(
+                            tracking_number=tracking,
+                        ).first()
+                    if parcel is None and supplier_tracking:
+                        parcel = Parcel.objects.filter(
+                            supplier_tracking_number=supplier_tracking,
+                        ).first()
+                    if parcel is None and order and order_sequence:
+                        parcel = Parcel.objects.filter(
+                            order=order,
+                            order_sequence=order_sequence,
+                        ).first()
 
-                    # Mise à jour de l'ordre si trouvé (uniquement si pas déjà lié ou si admin force)
-                    if order and (parcel.order is None or parcel.order != order):
+                    created = parcel is None
+                    if created:
+                        parcel = Parcel(
+                            tracking_number=tracking or supplier_tracking,
+                            order=order,
+                            order_sequence=order_sequence,
+                        )
+                    elif (
+                        tracking
+                        and tracking != parcel.tracking_number
+                        and not supplier_tracking
+                    ):
+                        # Le numéro Bujito reste stable ; le numéro reçu devient
+                        # le suivi du fournisseur.
+                        supplier_tracking = tracking
+
+                    for field, value in defaults.items():
+                        setattr(parcel, field, value)
+                    if supplier_tracking:
+                        parcel.supplier_tracking_number = supplier_tracking
+                    if order and parcel.order_id != order.id:
                         parcel.order = order
-                        parcel.save()
-                    elif user and parcel.order is None:
-                        # Si on a un user mais pas d'order, on pourrait créer une commande fantôme ou juste stocker l'info
-                        pass
+                    if order_sequence and parcel.order_sequence != order_sequence:
+                        parcel.order_sequence = order_sequence
+                    parcel.save()
 
                     if created:
                         created_count += 1

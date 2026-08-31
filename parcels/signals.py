@@ -32,6 +32,28 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
         return
 
     tracking = instance.tracking_number or str(instance.pk)
+    if created and instance.status == "awaiting_arrival":
+        # Le service de provisionnement envoie une notification récapitulative
+        # avec tous les numéros de la commande.
+        return
+    if old_status == "awaiting_arrival" and instance.status == "pending":
+        send_fcm_notification(
+            user,
+            "Colis arrivé à l'entrepôt",
+            (
+                f"Votre colis {tracking} a été réceptionné à l'entrepôt "
+                "et peut maintenant être groupé."
+            ),
+            type="parcel",
+            reference_id=instance.pk,
+            data={
+                "type": "parcel",
+                "reference_id": instance.pk,
+                "action": "arrived",
+            },
+        )
+        return
+
     title = "Mise a jour colis"
     body = f"Votre colis {tracking} est maintenant: {instance.get_status_display()}"
     send_fcm_notification(
@@ -48,19 +70,106 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
 def _order_pre_save(sender, instance: Order, **kwargs):
     if not instance.pk:
         instance._old_status = None
+        instance._old_quote_ready = False
+        instance._old_total_amount = None
+        instance._old_withdrawal_fee = None
+        instance._old_product_links = None
+        instance._old_expected_parcel_count = None
         return
     try:
-        old = Order.objects.only("status").get(pk=instance.pk)
+        old = Order.objects.only(
+            "status",
+            "quote_ready",
+            "total_amount",
+            "withdrawal_fee",
+            "product_links",
+            "expected_parcel_count",
+        ).get(pk=instance.pk)
         instance._old_status = old.status
+        instance._old_quote_ready = old.quote_ready
+        instance._old_total_amount = old.total_amount
+        instance._old_withdrawal_fee = old.withdrawal_fee
+        instance._old_product_links = old.product_links
+        instance._old_expected_parcel_count = old.expected_parcel_count
     except Order.DoesNotExist:
         instance._old_status = None
+        instance._old_quote_ready = False
+        instance._old_total_amount = None
+        instance._old_withdrawal_fee = None
+        instance._old_product_links = None
+        instance._old_expected_parcel_count = None
 
 
 @receiver(post_save, sender=Order)
 def _order_post_save(sender, instance: Order, created: bool, **kwargs):
     user = instance.user
+
+    if created:
+        client_name = (user.full_name or instance.client_name or user.email).strip()
+        notify_admins(
+            "Nouvelle commande",
+            (
+                f"{client_name} ({user.email}) a envoyé la commande "
+                f"#{instance.pk}. Un devis est à établir."
+            ),
+            type="order",
+            reference_id=instance.pk,
+            data={
+                "type": "order",
+                "reference_id": instance.pk,
+                "action": "quote",
+            },
+        )
+        send_fcm_notification(
+            user,
+            "Commande reçue",
+            (
+                f"Votre commande #{instance.pk} a bien été reçue. "
+                "Vous serez notifié dès que le devis sera disponible."
+            ),
+            type="order",
+            reference_id=instance.pk,
+            data={"type": "order", "reference_id": instance.pk},
+        )
+        return
+
     old_status = getattr(instance, "_old_status", None)
-    if not created and old_status == instance.status:
+    old_quote_ready = getattr(instance, "_old_quote_ready", False)
+    old_total_amount = getattr(instance, "_old_total_amount", None)
+    old_withdrawal_fee = getattr(instance, "_old_withdrawal_fee", None)
+    old_product_links = getattr(instance, "_old_product_links", None)
+    old_expected_parcel_count = getattr(
+        instance,
+        "_old_expected_parcel_count",
+        None,
+    )
+    quote_updated = instance.quote_ready and (
+        not old_quote_ready
+        or old_total_amount != instance.total_amount
+        or old_withdrawal_fee != instance.withdrawal_fee
+        or old_product_links != instance.product_links
+        or old_expected_parcel_count != instance.expected_parcel_count
+    )
+
+    if quote_updated:
+        send_fcm_notification(
+            user,
+            "Devis disponible",
+            (
+                f"Le devis de votre commande #{instance.pk} est prêt. "
+                f"Montant total : {instance.total_amount:.2f} USD."
+            ),
+            type="order",
+            reference_id=instance.pk,
+            data={
+                "type": "order",
+                "reference_id": instance.pk,
+                "action": "quote_ready",
+            },
+        )
+        return
+
+    if old_status == instance.status:
         return
 
     title = "Mise a jour commande"

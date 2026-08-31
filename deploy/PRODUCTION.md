@@ -19,6 +19,7 @@ CSRF_TRUSTED_ORIGINS=https://apibudig.capslockdev.com
 CORS_ALLOW_ALL_ORIGINS=True
 PUBLIC_BASE_URL=https://apibudig.capslockdev.com
 SERVE_MEDIA=True
+PAYMENT_WEBHOOK_SECRET=<secret-fourni-au-prestataire>
 ```
 
 > `CORS_ALLOW_ALL_ORIGINS=True` ok pour l’app mobile + tests. Restreindre plus tard si besoin.
@@ -32,6 +33,14 @@ pip install -r requirements.txt
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 sudo systemctl restart bujitodigital-backend
+```
+
+Pour prévisualiser les anciennes commandes payées qui pourraient recevoir des
+numéros de suivi (aucune écriture sans `--apply`) :
+```bash
+python manage.py provision_paid_order_parcels
+# Après vérification uniquement :
+python manage.py provision_paid_order_parcels --apply
 ```
 
 ### 4. Media (images)
@@ -61,8 +70,13 @@ APK : `build\app\outputs\flutter-apk\app-release.apk`
 - [ ] Import + upload image OK
 - [ ] Commandes admin visibles
 - [ ] Notifications OK
+- [ ] Devis photo uniquement + nombre de colis enregistrés
+- [ ] Paiement confirmé → numéros `BUJ-*` créés une seule fois
+- [ ] Colis « En attente d’arrivée » → « Marquer arrivé » → groupage possible
 
 ## Notes
 - Ne **pas** écraser `db.sqlite3` / `media/` du VPS avec la copie locale.
 - Ne **pas** committer le `.env` local (DEBUG=True) vers le serveur.
-- Paiements carte = encore **simulation** (pas de vrai prestataire).
+- Paiements carte = encore **simulation** (pas de vrai prestataire). La
+  génération automatique démarre dès qu’un paiement passe réellement à
+  `completed` via webhook ou validation admin.

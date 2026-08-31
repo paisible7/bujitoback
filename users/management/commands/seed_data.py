@@ -247,6 +247,8 @@ class Command(BaseCommand):
                 user=user,
                 status=spec['status'],
                 total_amount=spec['amount'],
+                quote_ready=True,
+                expected_parcel_count=max(1, len(spec['parcels'])),
                 client_name=user.full_name,
                 client_phone=user.phone_number,
                 country=spec['country'],
@@ -269,10 +271,14 @@ class Command(BaseCommand):
                 self._attach_image(img.image, src, f'orders/{prefix.lower()}_{order.id}{src.suffix}')
                 # _attach_image already saves the ImageField (+ model)
 
-            for p_status, location, weight in spec['parcels']:
+            for order_sequence, (p_status, location, weight) in enumerate(
+                spec['parcels'],
+                start=1,
+            ):
                 tracking = f'{prefix}-{order.id:04d}-{parcel_counter:03d}'
                 parcel = Parcel.objects.create(
                     order=order,
+                    order_sequence=order_sequence,
                     tracking_number=tracking,
                     status=p_status,
                     current_location=location,
@@ -303,6 +309,8 @@ class Command(BaseCommand):
             user=user,
             status='processing',
             total_amount=Decimal('99.00'),
+            quote_ready=True,
+            expected_parcel_count=2,
             client_name=user.full_name,
             client_phone=user.phone_number,
             country='RDC',
@@ -312,6 +320,7 @@ class Command(BaseCommand):
         )
         p1 = Parcel.objects.create(
             order=done_order,
+            order_sequence=1,
             tracking_number=f'{prefix}-GRP-001',
             status='consolidated',
             current_location='Entrepot consolide',
@@ -321,6 +330,7 @@ class Command(BaseCommand):
         )
         p2 = Parcel.objects.create(
             order=done_order,
+            order_sequence=2,
             tracking_number=f'{prefix}-GRP-002',
             status='consolidated',
             current_location='Entrepot consolide',

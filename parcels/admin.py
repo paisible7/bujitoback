@@ -19,6 +19,8 @@ class ExcelImportForm(forms.Form):
 class ParcelAdmin(admin.ModelAdmin):
     list_display = (
         'tracking_number',
+        'supplier_tracking_number',
+        'order_sequence',
         'display_image',
         'client_name',
         'client_phone',
@@ -29,7 +31,14 @@ class ParcelAdmin(admin.ModelAdmin):
     )
     list_editable = ('status',)
     list_filter = ('status', 'warehouse_number', 'last_updated')
-    search_fields = ('tracking_number', 'client_name', 'client_phone', 'warehouse_number', 'description')
+    search_fields = (
+        'tracking_number',
+        'supplier_tracking_number',
+        'client_name',
+        'client_phone',
+        'warehouse_number',
+        'description',
+    )
     raw_id_fields = ('order',)
 
     change_list_template = "admin/parcels/parcel_change_list.html"
