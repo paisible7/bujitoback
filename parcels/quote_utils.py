@@ -99,15 +99,20 @@ def normalize_incoming_links(links) -> list[dict[str, Any]]:
     return []
 
 
-def compute_quote_total(items: list[dict[str, Any]], withdrawal_fee) -> Decimal:
+def compute_quote_total(
+    items: list[dict[str, Any]],
+    withdrawal_fee=0,
+    commission_fee=0,
+) -> Decimal:
     total = Decimal('0.00')
     for item in items:
         price = _to_decimal(item.get('price'))
         if price is not None:
             qty = _to_qty(item.get('quantity', 1))
             total += price * qty
-    fee = _to_decimal(withdrawal_fee) or Decimal('0.00')
-    return total + fee
+    withdrawal = _to_decimal(withdrawal_fee) or Decimal('0.00')
+    commission = _to_decimal(commission_fee) or Decimal('0.00')
+    return total + withdrawal + commission
 
 
 def total_items_quantity(items: list[dict[str, Any]]) -> int:

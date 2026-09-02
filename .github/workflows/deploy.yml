@@ -48,11 +48,18 @@ jobs:
           command_timeout: 15m
           script: |
             set -euo pipefail
-            cd "${{ secrets.DEPLOY_PATH }}"
-            git fetch origin
-            git checkout main
-            git pull --ff-only origin main
-            bash deploy/remote_update.sh --already-pulled
+            APP_DIR="${{ secrets.DEPLOY_PATH }}"
+            if [ -z "$APP_DIR" ]; then
+              APP_DIR="/home/paisible/web/apibudig.capslockdev.com/public_html"
+            fi
+            run() {
+              if [ "$(id -un)" = "paisible" ]; then
+                bash -lc "$1"
+              else
+                su - paisible -c "$1"
+              fi
+            }
+            run "cd '$APP_DIR' && git fetch origin && git checkout main && git pull --ff-only origin main && bash deploy/remote_update.sh --already-pulled"
 
       - name: Health check
         run: |

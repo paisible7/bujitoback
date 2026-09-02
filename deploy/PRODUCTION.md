@@ -12,24 +12,21 @@ en SSH au serveur, fait `git pull`, `migrate`, `collectstatic` et redémarre.
 Le clone dans `public_html` reste. Vérifie que `git pull` marche déjà :
 
 ```bash
-cd ~/public_html   # ou le vrai chemin du clone (ex. ~/public_html/bujitoback)
+cd ~/web/apibudig.capslockdev.com/public_html
 git status
 git pull
 ```
+
+Hôte SSH : `vps120167.serveur-vps.net` (tu te connectes en `root`, puis `su - paisible`).
 
 Crée une clé **uniquement pour le deploy** (sur ta machine Windows) :
 
 ```powershell
 ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\bujito_deploy -N ""
+Get-Content $env:USERPROFILE\.ssh\bujito_deploy.pub
 ```
 
-Ajoute la **clé publique** sur le serveur (`~/.ssh/authorized_keys`) :
-
-```powershell
-type $env:USERPROFILE\.ssh\bujito_deploy.pub
-```
-
-Puis en SSH sur le serveur :
+Ajoute la **clé publique** sur le serveur, dans `/root/.ssh/authorized_keys` (puisque GitHub se connectera en `root`) :
 
 ```bash
 mkdir -p ~/.ssh
@@ -41,21 +38,19 @@ chmod 600 ~/.ssh/authorized_keys
 Test :
 
 ```powershell
-ssh -i $env:USERPROFILE\.ssh\bujito_deploy USER@HOST "cd CHEMIN && git rev-parse --short HEAD"
+ssh -i $env:USERPROFILE\.ssh\bujito_deploy root@vps120167.serveur-vps.net "su - paisible -c 'cd ~/web/apibudig.capslockdev.com/public_html && git rev-parse --short HEAD'"
 ```
 
 ### 2. Secrets GitHub (repo `paisible7/bujitoback`)
 
 Settings → Secrets and variables → Actions → **Secrets** :
 
-| Secret | Exemple |
-|--------|---------|
-| `SSH_HOST` | `capslockdev.com` ou l’IP |
-| `SSH_USER` | utilisateur SSH cPanel / VPS |
+| Secret | Valeur |
+|--------|--------|
+| `SSH_HOST` | `vps120167.serveur-vps.net` |
+| `SSH_USER` | `root` |
 | `SSH_KEY` | contenu **privé** de `bujito_deploy` (tout le fichier, y compris BEGIN/END) |
-| `DEPLOY_PATH` | `/home/USER/public_html` (chemin exact du clone) |
-
-Le port SSH est `22` (cPanel). Pour un autre port, modifier `.github/workflows/deploy.yml`.
+| `DEPLOY_PATH` | `/home/paisible/web/apibudig.capslockdev.com/public_html` |
 
 Settings → Secrets and variables → Actions → **Variables** :
 
@@ -78,7 +73,7 @@ Le `.env`, `db.sqlite3` et `media/` du serveur **ne sont pas** touchés (gitigno
 
 ### 1. Code
 ```bash
-cd ~/public_html   # adapter le chemin
+cd ~/web/apibudig.capslockdev.com/public_html
 git pull
 bash deploy/remote_update.sh --already-pulled
 ```

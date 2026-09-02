@@ -2,6 +2,7 @@ import firebase_admin
 from firebase_admin import messaging
 from django.conf import settings
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +101,17 @@ def send_fcm_notification(
             android=android_config,
         )
 
-        # 4. Envoyer via Firebase
-        response = messaging.send_each_for_multicast(message)
+        # 4. Envoyer via Firebase hors requête HTTP (sinon le devis timeout).
+        def _push():
+            try:
+                messaging.send_each_for_multicast(message)
+            except Exception:
+                logger.exception("FCM push failed for notification %s", notif.pk)
+
+        threading.Thread(target=_push, daemon=True, name="fcm-push").start()
         return {
             "success": True,
-            "success_count": response.success_count,
-            "failure_count": response.failure_count,
+            "queued": True,
             "notification_id": notif.pk,
         }
 

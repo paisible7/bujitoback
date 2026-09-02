@@ -69,6 +69,12 @@ log "migrate + collectstatic..."
 
 restarted=0
 
+if [[ -x "$ROOT_DIR/venv/bin/gunicorn" ]] && pgrep -f "$ROOT_DIR/venv/bin/gunicorn" >/dev/null 2>&1; then
+  log "reload gunicorn du projet..."
+  pkill -HUP -f "$ROOT_DIR/venv/bin/gunicorn" || true
+  restarted=1
+fi
+
 if [[ -f gunicorn.pid ]]; then
   pid="$(tr -d '[:space:]' < gunicorn.pid || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then

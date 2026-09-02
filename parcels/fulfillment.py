@@ -8,6 +8,7 @@ from django.db import transaction
 from notifications.utils import notify_admins, send_fcm_notification
 
 from .models import Order, Parcel
+from .order_status import sync_order_status
 
 
 @dataclass(frozen=True)
@@ -115,8 +116,7 @@ def provision_order_parcels(
                 created_count += 1
             parcels.append(parcel)
 
-        if order.status == "pending":
-            Order.objects.filter(pk=order.pk).update(status="processing")
+        sync_order_status(order)
 
         tracking_numbers = tuple(
             parcel.tracking_number

@@ -14,6 +14,7 @@ class ParcelSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     package_photo = serializers.SerializerMethodField()
     user_email = serializers.SerializerMethodField()
+    was_grouped = serializers.SerializerMethodField()
 
     class Meta:
         model = Parcel
@@ -22,9 +23,12 @@ class ParcelSerializer(serializers.ModelSerializer):
             'order_sequence', 'status', 'current_location',
             'client_name', 'client_phone', 'weight_volume',
             'warehouse_number', 'description', 'image', 'package_photo',
-            'last_updated', 'order', 'user_email',
+            'last_updated', 'order', 'user_email', 'was_grouped',
         ]
         read_only_fields = ('last_updated',)
+
+    def get_was_grouped(self, obj):
+        return obj.consolidations.exists()
 
     def get_image(self, obj):
         return self._absolute_image_url(obj)
@@ -72,7 +76,7 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = (
             'id', 'user', 'user_email', 'user_full_name', 'order_date', 'status',
-            'total_amount', 'withdrawal_fee', 'quote_ready',
+            'total_amount', 'withdrawal_fee', 'commission_fee', 'quote_ready',
             'expected_parcel_count', 'payment_completed',
             'client_name', 'client_phone', 'country', 'city',
             'product_links', 'product_links_list', 'product_items',
@@ -109,7 +113,10 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
 
     def get_payment_completed(self, obj):
-        return obj.payments.filter(status='completed').exists()
+        cache = getattr(obj, "_prefetched_objects_cache", None)
+        if cache is not None and "payments" in cache:
+            return any(payment.status == "completed" for payment in obj.payments.all())
+        return obj.payments.filter(status="completed").exists()
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):
@@ -139,6 +146,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         validated_data['quantity'] = total_items_quantity(items)
         validated_data['total_amount'] = 0
         validated_data['withdrawal_fee'] = 0
+        validated_data['commission_fee'] = 0
         validated_data['quote_ready'] = False
         if 'status' not in validated_data:
             validated_data['status'] = 'pending'
@@ -146,12 +154,19 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
 
 class OrderQuoteSerializer(serializers.Serializer):
-    """Admin : lignes du devis + frais de retrait → total recalculé."""
+    """Admin : lignes du devis + frais (retrait, commission) → total recalculé."""
     product_items = serializers.ListField(
         child=serializers.DictField(),
         allow_empty=False,
     )
     withdrawal_fee = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    commission_fee = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        min_value=0,
+        required=False,
+        default=0,
+    )
     expected_parcel_count = serializers.IntegerField(min_value=1, max_value=100)
     status = serializers.ChoiceField(
         choices=['pending', 'processing', 'shipped', 'delivered', 'cancelled'],
@@ -197,6 +212,7 @@ class OrderQuoteSerializer(serializers.Serializer):
         total = compute_quote_total(
             attrs.get('product_items', []),
             attrs.get('withdrawal_fee', 0),
+            attrs.get('commission_fee', 0),
         )
         if total <= 0:
             raise serializers.ValidationError(
@@ -215,11 +231,17 @@ class OrderQuoteSerializer(serializers.Serializer):
 
     def update(self, instance, validated_data):
         items = validated_data['product_items']
-        fee = validated_data['withdrawal_fee']
+        withdrawal_fee = validated_data['withdrawal_fee']
+        commission_fee = validated_data.get('commission_fee', 0)
         instance.expected_parcel_count = validated_data['expected_parcel_count']
         instance.product_links = dump_product_items(items)
-        instance.withdrawal_fee = fee
-        instance.total_amount = compute_quote_total(items, fee)
+        instance.withdrawal_fee = withdrawal_fee
+        instance.commission_fee = commission_fee
+        instance.total_amount = compute_quote_total(
+            items,
+            withdrawal_fee,
+            commission_fee,
+        )
         instance.quantity = total_items_quantity(items)
         instance.quote_ready = True
         if 'status' in validated_data:

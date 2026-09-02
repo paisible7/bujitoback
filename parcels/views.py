@@ -77,8 +77,12 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
     def get_serializer_class(self):
         if self.request.method in ('PUT', 'PATCH'):
             data = self.request.data
-            # Devis admin : product_items + withdrawal_fee
-            if 'product_items' in data or 'withdrawal_fee' in data:
+            # Devis admin : product_items + frais
+            if (
+                'product_items' in data
+                or 'withdrawal_fee' in data
+                or 'commission_fee' in data
+            ):
                 return OrderQuoteSerializer
         return OrderSerializer
 
@@ -95,7 +99,24 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
 
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
+        if (
+            serializer_class is OrderSerializer
+            and 'status' in request.data
+            and request.data.get('status') != 'cancelled'
+            and instance.parcels.exists()
+        ):
+            return Response(
+                {
+                    'detail': (
+                        'Le statut de la commande est calculé automatiquement '
+                        'à partir des colis. Mettez à jour le statut de chaque colis.'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         self.perform_update(serializer)
+        if serializer_class is OrderSerializer and instance.parcels.exists():
+            instance.refresh_from_db()
         return Response(OrderSerializer(instance, context={'request': request}).data)
 
     def perform_update(self, serializer):

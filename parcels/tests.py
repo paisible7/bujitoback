@@ -43,6 +43,7 @@ class OrderQuoteSerializerTests(TestCase):
                     }
                 ],
                 "withdrawal_fee": "5.00",
+                "commission_fee": "2.50",
                 "expected_parcel_count": 3,
             },
         )
@@ -53,10 +54,79 @@ class OrderQuoteSerializerTests(TestCase):
         self.assertTrue(quoted_order.quote_ready)
         self.assertEqual(quoted_order.status, "pending")
         self.assertEqual(quoted_order.expected_parcel_count, 3)
-        self.assertEqual(quoted_order.total_amount, Decimal("30.00"))
+        self.assertEqual(quoted_order.total_amount, Decimal("32.50"))
+        self.assertEqual(quoted_order.commission_fee, Decimal("2.50"))
         items = parse_product_items(quoted_order.product_links)
         self.assertEqual(items[0]["description"], "Produit présenté sur la photo")
         self.assertEqual(items[0]["url"], "")
+
+
+class OrderStatusSyncTests(TestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="sync@example.com",
+            password="test-password",
+        )
+        self.signal_notification = patch("parcels.signals.send_fcm_notification")
+        self.signal_admin_notification = patch("parcels.signals.notify_admins")
+        self.signal_notification.start()
+        self.signal_admin_notification.start()
+        self.addCleanup(self.signal_notification.stop)
+        self.addCleanup(self.signal_admin_notification.stop)
+
+    def test_order_status_follows_parcel_progression(self):
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("20.00"),
+            expected_parcel_count=1,
+        )
+        provision_order_parcels(order.pk, notify=False)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "processing")
+
+        parcel = order.parcels.get()
+        parcel.status = "pending"
+        parcel.save(update_fields=["status", "last_updated"])
+        order.refresh_from_db()
+        self.assertEqual(order.status, "processing")
+
+        parcel.status = "in_transit"
+        parcel.save(update_fields=["status", "last_updated"])
+        order.refresh_from_db()
+        self.assertEqual(order.status, "shipped")
+
+        parcel.status = "delivered"
+        parcel.save(update_fields=["status", "last_updated"])
+        order.refresh_from_db()
+        self.assertEqual(order.status, "delivered")
+
+    def test_manual_order_status_is_rejected_when_parcels_exist(self):
+        admin = CustomUser.objects.create_user(
+            email="admin-sync@example.com",
+            password="test-password",
+            role="admin",
+            is_staff=True,
+        )
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("20.00"),
+            expected_parcel_count=1,
+        )
+        provision_order_parcels(order.pk, notify=False)
+        client = APIClient()
+        client.force_authenticate(admin)
+
+        response = client.patch(
+            reverse("order-detail", kwargs={"pk": order.pk}),
+            {"status": "shipped"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "processing")
 
 
 class ParcelProvisioningTests(TestCase):

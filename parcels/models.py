@@ -22,6 +22,12 @@ class Order(models.Model):
         default=0.00,
         verbose_name=_("Frais de retrait"),
     )
+    commission_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        verbose_name=_("Frais de commission"),
+    )
     quote_ready = models.BooleanField(default=False, verbose_name=_("Devis établi"))
     expected_parcel_count = models.PositiveSmallIntegerField(
         default=1,

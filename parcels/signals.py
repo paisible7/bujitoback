@@ -3,9 +3,10 @@ from __future__ import annotations
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 
-from notifications.utils import send_fcm_notification, notify_admins
+from notifications.utils import notify_admins, send_fcm_notification
 
-from .models import Parcel, Order, Consolidation
+from .models import Consolidation, Order, Parcel
+from .order_status import sync_order_status_by_id
 
 
 @receiver(pre_save, sender=Parcel)
@@ -22,6 +23,9 @@ def _parcel_pre_save(sender, instance: Parcel, **kwargs):
 
 @receiver(post_save, sender=Parcel)
 def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
+    if instance.order_id:
+        sync_order_status_by_id(instance.order_id)
+
     order = instance.order
     user = getattr(order, "user", None)
     if user is None:
@@ -73,6 +77,7 @@ def _order_pre_save(sender, instance: Order, **kwargs):
         instance._old_quote_ready = False
         instance._old_total_amount = None
         instance._old_withdrawal_fee = None
+        instance._old_commission_fee = None
         instance._old_product_links = None
         instance._old_expected_parcel_count = None
         return
@@ -82,6 +87,7 @@ def _order_pre_save(sender, instance: Order, **kwargs):
             "quote_ready",
             "total_amount",
             "withdrawal_fee",
+            "commission_fee",
             "product_links",
             "expected_parcel_count",
         ).get(pk=instance.pk)
@@ -89,6 +95,7 @@ def _order_pre_save(sender, instance: Order, **kwargs):
         instance._old_quote_ready = old.quote_ready
         instance._old_total_amount = old.total_amount
         instance._old_withdrawal_fee = old.withdrawal_fee
+        instance._old_commission_fee = old.commission_fee
         instance._old_product_links = old.product_links
         instance._old_expected_parcel_count = old.expected_parcel_count
     except Order.DoesNotExist:
@@ -96,6 +103,7 @@ def _order_pre_save(sender, instance: Order, **kwargs):
         instance._old_quote_ready = False
         instance._old_total_amount = None
         instance._old_withdrawal_fee = None
+        instance._old_commission_fee = None
         instance._old_product_links = None
         instance._old_expected_parcel_count = None
 
@@ -137,6 +145,7 @@ def _order_post_save(sender, instance: Order, created: bool, **kwargs):
     old_quote_ready = getattr(instance, "_old_quote_ready", False)
     old_total_amount = getattr(instance, "_old_total_amount", None)
     old_withdrawal_fee = getattr(instance, "_old_withdrawal_fee", None)
+    old_commission_fee = getattr(instance, "_old_commission_fee", None)
     old_product_links = getattr(instance, "_old_product_links", None)
     old_expected_parcel_count = getattr(
         instance,
@@ -147,6 +156,7 @@ def _order_post_save(sender, instance: Order, created: bool, **kwargs):
         not old_quote_ready
         or old_total_amount != instance.total_amount
         or old_withdrawal_fee != instance.withdrawal_fee
+        or old_commission_fee != instance.commission_fee
         or old_product_links != instance.product_links
         or old_expected_parcel_count != instance.expected_parcel_count
     )

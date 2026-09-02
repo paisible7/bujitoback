@@ -101,21 +101,13 @@ DATABASES = {
 }
 
 
-# Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
-
+# Password validation — aligné avec l'app (min. 6 caractères).
+# Les validateurs Django par défaut (mot de passe trop courant, similarité, etc.)
+# sont désactivés pour éviter des refus trop stricts en admin / reset.
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+        'OPTIONS': {'min_length': 6},
     },
 ]
 
