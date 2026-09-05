@@ -8,6 +8,7 @@ from .quote_utils import (
     normalize_incoming_links,
     compute_quote_total,
     total_items_quantity,
+    flatten_packages,
 )
 
 class ParcelSerializer(serializers.ModelSerializer):
@@ -54,7 +55,7 @@ class OrderImageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderImage
-        fields = ('id', 'image', 'uploaded_at')
+        fields = ('id', 'image', 'package_index', 'uploaded_at')
 
     def get_image(self, obj):
         return absolute_media_url(
@@ -97,12 +98,15 @@ class OrderSerializer(serializers.ModelSerializer):
         for item in items:
             price = item.get('price')
             qty = int(item.get('quantity') or 1)
-            result.append({
+            entry = {
                 'url': item.get('url', ''),
                 'description': item.get('description', ''),
                 'price': float(price) if price is not None else None,
                 'quantity': qty if qty > 0 else 1,
-            })
+            }
+            if 'package_index' in item:
+                entry['package_index'] = item['package_index']
+            result.append(entry)
         return result
 
     def get_product_links_list(self, obj):
@@ -121,18 +125,23 @@ class OrderSerializer(serializers.ModelSerializer):
 
 class OrderCreateSerializer(serializers.ModelSerializer):
     product_links = serializers.JSONField(required=False, allow_null=True)
+    packages = serializers.JSONField(required=False, allow_null=True)
     client_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     client_phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     country = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     city = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     quantity = serializers.IntegerField(required=False, min_value=1)
     comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    expected_parcel_count = serializers.IntegerField(
+        required=False, min_value=1, max_value=100
+    )
 
     class Meta:
         model = Order
         fields = [
             'total_amount', 'status', 'client_name', 'client_phone',
-            'country', 'city', 'product_links', 'quantity', 'comment',
+            'country', 'city', 'product_links', 'packages', 'quantity',
+            'comment', 'expected_parcel_count',
         ]
         extra_kwargs = {
             'status': {'required': False},
@@ -140,14 +149,42 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         }
 
     def create(self, validated_data):
+        packages = validated_data.pop('packages', None)
+        if isinstance(packages, str):
+            import json
+            try:
+                packages = json.loads(packages)
+            except Exception:
+                packages = None
         links = validated_data.pop('product_links', None)
-        items = normalize_incoming_links(links)
+        expected = validated_data.pop('expected_parcel_count', None)
+
+        items = []
+        aggregated_comment = None
+        package_count = 0
+        if packages:
+            items, package_count, aggregated_comment = flatten_packages(packages)
+        if not items:
+            items = normalize_incoming_links(links)
+
         validated_data['product_links'] = dump_product_items(items)
         validated_data['quantity'] = total_items_quantity(items)
         validated_data['total_amount'] = 0
         validated_data['withdrawal_fee'] = 0
         validated_data['commission_fee'] = 0
         validated_data['quote_ready'] = False
+
+        if expected is not None:
+            validated_data['expected_parcel_count'] = expected
+        elif package_count > 0:
+            validated_data['expected_parcel_count'] = package_count
+        else:
+            # Une commande = au moins 1 colis prévu
+            validated_data['expected_parcel_count'] = 1
+
+        if aggregated_comment and not validated_data.get('comment'):
+            validated_data['comment'] = aggregated_comment
+
         if 'status' not in validated_data:
             validated_data['status'] = 'pending'
         return super().create(validated_data)
@@ -206,6 +243,12 @@ class OrderQuoteSerializer(serializers.Serializer):
                 'price': price_dec,
                 'quantity': qty,
             })
+            pkg = entry.get('package_index')
+            if pkg is not None and pkg != '':
+                try:
+                    cleaned[-1]['package_index'] = max(0, int(pkg))
+                except (TypeError, ValueError):
+                    pass
         return cleaned
 
     def validate(self, attrs):

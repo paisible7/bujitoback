@@ -27,19 +27,28 @@ IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
 
 USERS = [
     {
+        'email': 'super@bujito.com',
+        'full_name': 'Super Bujito',
+        'phone_number': '+243810000000',
+        'role': 'superuser',
+        'is_staff': True,
+        'is_superuser': True,
+        'language': 'fr',
+    },
+    {
         'email': 'admin@bujito.com',
         'full_name': 'Admin Bujito',
         'phone_number': '+243810000001',
         'role': 'admin',
-        'is_staff': True,
-        'is_superuser': True,
+        'is_staff': False,
+        'is_superuser': False,
         'language': 'fr',
     },
     {
         'email': 'alice@bujito.com',
         'full_name': 'Alice Mbala',
         'phone_number': '+243810000002',
-        'role': 'user',
+        'role': 'client',
         'is_staff': False,
         'is_superuser': False,
         'language': 'fr',
@@ -48,7 +57,7 @@ USERS = [
         'email': 'bob@bujito.com',
         'full_name': 'Bob Kalonji',
         'phone_number': '+243810000003',
-        'role': 'user',
+        'role': 'client',
         'is_staff': False,
         'is_superuser': False,
         'language': 'en',
@@ -90,6 +99,7 @@ class Command(BaseCommand):
 
         self.stdout.write('')
         self.stdout.write(self.style.SUCCESS('Seeder terminé. Comptes :'))
+        self.stdout.write(f'  Super  : super@bujito.com  / {SEED_PASSWORD}')
         self.stdout.write(f'  Admin  : admin@bujito.com  / {SEED_PASSWORD}')
         self.stdout.write(f'  Client : alice@bujito.com  / {SEED_PASSWORD}')
         self.stdout.write(f'  Client : bob@bujito.com    / {SEED_PASSWORD}')

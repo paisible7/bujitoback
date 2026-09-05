@@ -19,6 +19,7 @@ from .serializers import (
     ConsolidationUpdateSerializer,
 )
 from users.permissions import IsAdminUser
+from users.roles import is_app_admin
 from users.models import CustomUser
 
 class OrderListCreateView(generics.ListCreateAPIView):
@@ -38,7 +39,7 @@ class OrderListCreateView(generics.ListCreateAPIView):
             .prefetch_related('parcels', 'images', 'payments')
             .order_by('-order_date')
         )
-        if self.request.user.is_authenticated and self.request.user.role == 'admin':
+        if self.request.user.is_authenticated and is_app_admin(self.request.user):
             return queryset
         return queryset.filter(user=self.request.user)
 
@@ -50,9 +51,33 @@ class OrderListCreateView(generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
 
-        # Photos produit envoyées en multipart (champ "images")
-        for uploaded in request.FILES.getlist('images'):
-            OrderImage.objects.create(order=serializer.instance, image=uploaded)
+        # Photos produit : champ "images" + index colis optionnel "image_package_indexes"
+        indexes_raw = request.data.get('image_package_indexes', '')
+        index_list = []
+        if isinstance(indexes_raw, str) and indexes_raw.strip():
+            for part in indexes_raw.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    index_list.append(max(0, int(part)))
+                except ValueError:
+                    index_list.append(0)
+        elif isinstance(indexes_raw, list):
+            for part in indexes_raw:
+                try:
+                    index_list.append(max(0, int(part)))
+                except (TypeError, ValueError):
+                    index_list.append(0)
+
+        uploads = request.FILES.getlist('images')
+        for i, uploaded in enumerate(uploads):
+            pkg_index = index_list[i] if i < len(index_list) else 0
+            OrderImage.objects.create(
+                order=serializer.instance,
+                image=uploaded,
+                package_index=pkg_index,
+            )
 
         headers = self.get_success_headers(serializer.data)
         full_serializer = OrderSerializer(serializer.instance, context={'request': request})
@@ -67,10 +92,10 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
     def get_object(self):
         obj = super().get_object()
         if self.request.method in ('GET', 'HEAD', 'OPTIONS'):
-            if obj.user != self.request.user and self.request.user.role != 'admin':
+            if obj.user != self.request.user and (not is_app_admin(self.request.user)):
                 self.permission_denied(self.request)
             return obj
-        if self.request.user.role != 'admin':
+        if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
         return obj
 
@@ -137,14 +162,14 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         if not self.request.user.is_authenticated:
             return Parcel.objects.none()
         queryset = Parcel.objects.select_related('order__user')
-        if self.request.user.role == 'admin':
+        if is_app_admin(self.request.user):
             return queryset
         return queryset.filter(order__user=self.request.user)
 
     def perform_create(self, serializer):
         # Still check for admin for POST via IsAdminUser if we use it,
         # or handle it here if we use IsAuthenticated.
-        if self.request.user.role != 'admin':
+        if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
         serializer.save()
 
@@ -156,14 +181,14 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_object(self):
         obj = super().get_object()
-        if self.request.user.role == 'admin':
+        if is_app_admin(self.request.user):
             return obj
         if obj.order and obj.order.user == self.request.user:
             return obj
         self.permission_denied(self.request)
 
     def perform_update(self, serializer):
-        if self.request.user.role != 'admin':
+        if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
         serializer.save()
 
@@ -241,7 +266,7 @@ class ConsolidationListView(generics.ListAPIView):
             'parcel_decisions',
             'user',
         )
-        if self.request.user.is_authenticated and self.request.user.role == 'admin':
+        if self.request.user.is_authenticated and is_app_admin(self.request.user):
             return qs.all()
         return qs.filter(user=self.request.user)
 
@@ -258,10 +283,10 @@ class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
     def get_object(self):
         obj = super().get_object()
         if self.request.method == 'GET':
-            if obj.user != self.request.user and self.request.user.role != 'admin':
+            if obj.user != self.request.user and (not is_app_admin(self.request.user)):
                 self.permission_denied(self.request)
             return obj
-        if self.request.user.role != 'admin':
+        if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
         return obj
 

@@ -53,6 +53,7 @@ class AdminSendNotificationSerializer(serializers.Serializer):
         return attrs
 
     def validate_user_id(self, value):
-        if not User.objects.filter(pk=value, role='user').exists():
+        from users.roles import CLIENT_ROLES
+        if not User.objects.filter(pk=value, role__in=CLIENT_ROLES, is_active=True).exists():
             raise serializers.ValidationError("Utilisateur client introuvable.")
         return value

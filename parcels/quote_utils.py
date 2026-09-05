@@ -50,12 +50,19 @@ def parse_product_items(raw: str | None) -> list[dict[str, Any]]:
                 description = str(entry.get('description') or entry.get('label') or '').strip()
                 if not url and not description:
                     continue
-                items.append({
+                item = {
                     'url': url,
                     'description': description,
                     'price': _to_decimal(entry.get('price')),
                     'quantity': _to_qty(entry.get('quantity', 1)),
-                })
+                }
+                pkg = entry.get('package_index')
+                if pkg is not None and pkg != '':
+                    try:
+                        item['package_index'] = max(0, int(pkg))
+                    except (TypeError, ValueError):
+                        pass
+                items.append(item)
         return items
 
     for line in str(raw).splitlines():
@@ -84,6 +91,12 @@ def dump_product_items(items: list[dict[str, Any]]) -> str:
         else:
             dec = _to_decimal(price)
             entry['price'] = float(dec) if dec is not None else None
+        pkg = item.get('package_index')
+        if pkg is not None and pkg != '':
+            try:
+                entry['package_index'] = max(0, int(pkg))
+            except (TypeError, ValueError):
+                pass
         serializable.append(entry)
     return json.dumps(serializable, ensure_ascii=False)
 
@@ -113,6 +126,59 @@ def compute_quote_total(
     withdrawal = _to_decimal(withdrawal_fee) or Decimal('0.00')
     commission = _to_decimal(commission_fee) or Decimal('0.00')
     return total + withdrawal + commission
+
+
+def flatten_packages(packages) -> tuple[list[dict[str, Any]], int, str | None]:
+    """
+    Transforme une liste de colis client en product_items + expected_count + commentaire agrégé.
+    Chaque colis: {description?, comment?, links: [{url, quantity}] | product_items}
+    """
+    if not isinstance(packages, list) or not packages:
+        return [], 0, None
+
+    items: list[dict[str, Any]] = []
+    comments: list[str] = []
+    package_count = 0
+
+    for index, package in enumerate(packages):
+        if not isinstance(package, dict):
+            continue
+        package_count += 1
+        pkg_index = package_count - 1
+        description = str(
+            package.get('description') or package.get('comment') or ''
+        ).strip()
+        comment = str(package.get('comment') or '').strip()
+        if comment and comment != description:
+            comments.append(f"Colis {package_count}: {comment}")
+        elif description:
+            comments.append(f"Colis {package_count}: {description}")
+
+        links = package.get('links') or package.get('product_items') or package.get('items') or []
+        link_items = normalize_incoming_links(links)
+        if not link_items and description:
+            link_items = [{'url': '', 'description': description, 'quantity': _to_qty(package.get('quantity', 1))}]
+        elif not link_items and package.get('quantity'):
+            link_items = [{'url': '', 'description': description or f'Colis {package_count}', 'quantity': _to_qty(package.get('quantity', 1))}]
+
+        for link in link_items:
+            entry = dict(link)
+            entry['package_index'] = pkg_index
+            if description and not entry.get('description'):
+                entry['description'] = description
+            items.append(entry)
+
+        # Colis photo-only sans lien ni description explicite
+        if not link_items:
+            items.append({
+                'url': '',
+                'description': description or f'Colis {package_count}',
+                'quantity': _to_qty(package.get('quantity', 1)),
+                'package_index': pkg_index,
+            })
+
+    aggregated_comment = '\n'.join(comments) if comments else None
+    return items, max(package_count, 1 if items else 0), aggregated_comment
 
 
 def total_items_quantity(items: list[dict[str, Any]]) -> int:

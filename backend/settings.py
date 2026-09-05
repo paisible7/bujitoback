@@ -59,6 +59,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'backend.media_cors.MediaCorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -190,6 +191,22 @@ SIMPLE_JWT = {
 
 # CORS Settings
 CORS_ALLOW_ALL_ORIGINS = env('CORS_ALLOW_ALL_ORIGINS')
+# Headers utiles pour le front web (images / multipart).
+CORS_ALLOW_HEADERS = list(env.list(
+    'CORS_ALLOW_HEADERS',
+    default=[
+        'accept',
+        'accept-encoding',
+        'authorization',
+        'content-type',
+        'dnt',
+        'origin',
+        'user-agent',
+        'x-csrftoken',
+        'x-requested-with',
+    ],
+))
+CORS_EXPOSE_HEADERS = ['content-type', 'content-length']
 
 # Payments
 # Used to verify provider webhooks (HMAC-SHA256 on raw request body).

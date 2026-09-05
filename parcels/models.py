@@ -56,6 +56,10 @@ class Order(models.Model):
 class OrderImage(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='images', verbose_name=_("Commande"))
     image = models.ImageField(upload_to='orders/', verbose_name=_("Image"))
+    package_index = models.PositiveSmallIntegerField(
+        default=0,
+        verbose_name=_("Index du colis dans la commande"),
+    )
     uploaded_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date d'upload"))
 
     class Meta:

@@ -4,16 +4,29 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
+from django.db.models import Q
+from django.contrib.auth import get_user_model
+
 from .serializers import (
     RegisterSerializer,
     UserSerializer,
+    AdminCreateUserSerializer,
     CustomTokenObtainPairSerializer,
     PasswordResetVerifySerializer,
     PasswordResetSerializer,
 )
-from django.contrib.auth import get_user_model
+from .roles import (
+    CLIENT_ROLES,
+    ROLE_ADMIN,
+    ROLE_CLIENT,
+    is_app_admin,
+    is_platform_superuser,
+    normalize_role,
+)
+from .permissions import IsAppAdmin
 
 User = get_user_model()
+
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
@@ -27,11 +40,12 @@ class RegisterView(APIView):
                 'refresh': str(refresh),
                 'access': str(refresh.access_token),
                 'email': user.email,
-                'role': user.role,
+                'role': normalize_role(user.role),
                 'full_name': user.full_name,
-                'phone_number': user.phone_number, # Ajout de phone_number à la réponse
+                'phone_number': user.phone_number,
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
@@ -46,6 +60,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         print(f'[auth/login] status={response.status_code}')
         return response
 
+
 class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -54,28 +69,63 @@ class UserProfileView(APIView):
         return Response(serializer.data)
 
 
-class UserListView(generics.ListAPIView):
-    """Liste des clients pour l'admin."""
-    serializer_class = UserSerializer
-    permission_classes = [IsAuthenticated]
+class UserListCreateView(generics.ListCreateAPIView):
+    """
+    Liste / création d'utilisateurs.
+    - Admin : voit et crée des clients
+    - Superuser : voit clients + admins, peut créer clients et admins
+    """
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return AdminCreateUserSerializer
+        return UserSerializer
 
     def get_queryset(self):
-        if getattr(self.request.user, 'role', None) != 'admin':
-            return User.objects.none()
+        actor = self.request.user
+        if is_platform_superuser(actor):
+            qs = User.objects.filter(
+                role__in=[ROLE_CLIENT, ROLE_ADMIN, 'user'],
+            ).order_by('role', 'email')
+        else:
+            qs = User.objects.filter(role__in=CLIENT_ROLES).order_by('email')
 
-        qs = User.objects.filter(role='user', is_active=True).order_by('email')
+        role_filter = self.request.query_params.get('role', '').strip().lower()
+        if role_filter:
+            role_filter = normalize_role(role_filter)
+            if role_filter == ROLE_CLIENT:
+                qs = qs.filter(role__in=CLIENT_ROLES)
+            else:
+                qs = qs.filter(role=role_filter)
+
+        # Par défaut pour l'écran notif : clients actifs seulement
+        clients_only = self.request.query_params.get('clients_only', '').lower() in (
+            '1', 'true', 'yes',
+        )
+        if clients_only:
+            qs = qs.filter(role__in=CLIENT_ROLES, is_active=True)
+
         search = self.request.query_params.get('search', '').strip()
         if search:
-            qs = qs.filter(email__icontains=search) | qs.filter(full_name__icontains=search)
+            qs = qs.filter(
+                Q(email__icontains=search)
+                | Q(full_name__icontains=search)
+                | Q(phone_number__icontains=search)
+            )
         return qs
 
-    def list(self, request, *args, **kwargs):
-        if request.user.role != 'admin':
-            return Response(
-                {"detail": "Action réservée aux administrateurs."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        return super().list(request, *args, **kwargs)
+    def create(self, request, *args, **kwargs):
+        serializer = AdminCreateUserSerializer(
+            data=request.data,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(
+            UserSerializer(user).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class PasswordResetVerifyView(APIView):

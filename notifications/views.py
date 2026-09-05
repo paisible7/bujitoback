@@ -52,7 +52,9 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
     @decorators.action(detail=False, methods=['post'], url_path='send')
     def send_notification(self, request):
-        if request.user.role != 'admin':
+        from users.roles import CLIENT_ROLES, is_app_admin
+
+        if not is_app_admin(request.user):
             return Response({"detail": "Action réservée aux administrateurs."}, status=status.HTTP_403_FORBIDDEN)
 
         # Multipart: send_to_all arrive souvent en string "true"/"false"
@@ -67,7 +69,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
 
         if data.get('send_to_all'):
-            recipients = User.objects.filter(role='user', is_active=True)
+            recipients = User.objects.filter(role__in=CLIENT_ROLES, is_active=True)
         else:
             recipients = User.objects.filter(pk=data['user_id'])
 
