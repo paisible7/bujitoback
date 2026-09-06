@@ -1,5 +1,6 @@
 name: Deploy production
 
+# GitHub = déclencheur uniquement. Tout le travail réel tourne sur le VPS.
 on:
   push:
     branches: [main]
@@ -10,34 +11,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    env:
-      DEBUG: "True"
-      SECRET_KEY: ci-test-secret-not-for-production
-      ALLOWED_HOSTS: localhost,127.0.0.1
-      CORS_ALLOW_ALL_ORIGINS: "True"
-      PAYMENT_WEBHOOK_SECRET: ""
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements.txt
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Django tests
-        run: python manage.py test --verbosity=1
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     steps:
-      - name: Deploy over SSH
+      - name: Deploy to VPS over SSH
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -52,14 +30,30 @@ jobs:
             if [ -z "$APP_DIR" ]; then
               APP_DIR="/home/paisible/web/apibudig.capslockdev.com/public_html"
             fi
-            run() {
+            SERVICE="${SYSTEMD_SERVICE:-bujito_backend}"
+
+            run_as_app() {
               if [ "$(id -un)" = "paisible" ]; then
                 bash -lc "$1"
               else
                 su - paisible -c "$1"
               fi
             }
-            run "cd '$APP_DIR' && git fetch origin && git checkout main && git pull --ff-only origin main && bash deploy/remote_update.sh --already-pulled"
+
+            echo "[deploy] sync code = origin/main"
+            run_as_app "cd '$APP_DIR' && git fetch origin && git checkout main && git reset --hard origin/main && SYSTEMD_SERVICE='$SERVICE' bash deploy/remote_update.sh --already-pulled"
+
+            echo "[deploy] restart $SERVICE"
+            if [ "$(id -un)" = "root" ]; then
+              systemctl restart "$SERVICE"
+              systemctl is-active --quiet "$SERVICE"
+            elif sudo -n systemctl restart "$SERVICE" 2>/dev/null; then
+              sudo -n systemctl is-active --quiet "$SERVICE"
+            else
+              echo "[deploy] restart systemd refusé — configure sudoers pour paisible (systemctl restart $SERVICE) ou utilise SSH_USER=root"
+              exit 1
+            fi
+            echo "[deploy] service active"
 
       - name: Health check
         run: |
@@ -69,5 +63,9 @@ jobs:
           echo "HTTP $code"
           if [ -z "$code" ] || [ "$code" = "000" ]; then
             echo "API unreachable"
+            exit 1
+          fi
+          if [ "$code" -ge 500 ]; then
+            echo "API returned server error"
             exit 1
           fi

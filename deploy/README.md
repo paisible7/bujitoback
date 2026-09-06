@@ -1,7 +1,20 @@
 # Deployment
 
-**Déploiement automatique :** GitHub Actions → SSH → `git pull` sur le serveur.
-Voir [`PRODUCTION.md`](./PRODUCTION.md) section A (secrets `SSH_HOST`, `SSH_USER`, `SSH_KEY`, `DEPLOY_PATH` + variable `DEPLOY_ENABLED=true`).
+**Déploiement automatique :** GitHub Actions se connecte en SSH et lance sur le VPS
+`git fetch` + `reset --hard origin/main` + `deploy/remote_update.sh` + restart `bujito_backend`.
+Voir [`PRODUCTION.md`](./PRODUCTION.md).
+
+**Secours Windows :** `.\deploy\deploy_from_local.ps1`
+
+Les tests Django sont dans `.github/workflows/ci.yml` (PR / push), séparés du deploy.
+
+Mise à jour serveur (déjà sur le VPS) :
+
+```bash
+bash deploy/remote_update.sh
+# puis si besoin :
+sudo systemctl restart bujito_backend
+```
 
 This repo also supports two manual styles:
 

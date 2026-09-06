@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Met à jour le backend sur le serveur (git pull + deps + migrate + restart).
+# Met à jour le backend sur le serveur (git sync + deps + migrate + collectstatic).
 # Usage :
 #   bash deploy/remote_update.sh
 #   bash deploy/remote_update.sh --already-pulled
 #   DEPLOY_PATH=/home/user/public_html bash deploy/remote_update.sh
+#   SYSTEMD_SERVICE=bujito_backend bash deploy/remote_update.sh
+#
+# Par défaut : git fetch + reset --hard origin/<branch> (VPS = copie exacte de GitHub).
+# Restart systemd : préfère un sudo limité pour paisible, sinon restart depuis root (CI).
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n "${DEPLOY_PATH:-}" ]]; then
@@ -17,6 +21,9 @@ already_pulled=0
 if [[ "${1:-}" == "--already-pulled" ]]; then
   already_pulled=1
 fi
+
+# Service réel en prod (override possible).
+SYSTEMD_SERVICE="${SYSTEMD_SERVICE:-bujito_backend}"
 
 log() { echo "[deploy] $*"; }
 
@@ -33,10 +40,14 @@ if [[ ! -f .env ]]; then
 fi
 
 if [[ "$already_pulled" -eq 0 ]]; then
-  log "git fetch + pull (fast-forward)..."
+  log "git fetch + reset --hard origin/<branch>..."
   git fetch origin
   branch="$(git rev-parse --abbrev-ref HEAD)"
-  git pull --ff-only origin "$branch"
+  if [[ "$branch" == "HEAD" ]]; then
+    branch="main"
+    git checkout -B main "origin/main"
+  fi
+  git reset --hard "origin/$branch"
 fi
 
 log "commit: $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
@@ -69,13 +80,52 @@ log "migrate + collectstatic..."
 
 restarted=0
 
-if [[ -x "$ROOT_DIR/venv/bin/gunicorn" ]] && pgrep -f "$ROOT_DIR/venv/bin/gunicorn" >/dev/null 2>&1; then
-  log "reload gunicorn du projet..."
-  pkill -HUP -f "$ROOT_DIR/venv/bin/gunicorn" || true
+try_systemctl_restart() {
+  local unit="$1"
+  # Accepte "bujito_backend" ou "bujito_backend.service"
+  local name="${unit%.service}"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! systemctl cat "${name}.service" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  log "restart systemd ${name}.service..."
+  if sudo -n systemctl restart "${name}.service" 2>/dev/null; then
+    return 0
+  fi
+  if systemctl restart "${name}.service" 2>/dev/null; then
+    return 0
+  fi
+  log "systemd ${name}.service présent mais restart refusé (pas root / sudo nopasswd)."
+  log "→ redémarre en root : systemctl restart ${name}.service"
+  return 1
+}
+
+# 1) Service configuré (prod = bujito_backend)
+if try_systemctl_restart "$SYSTEMD_SERVICE"; then
   restarted=1
 fi
 
-if [[ -f gunicorn.pid ]]; then
+# 2) Ancien nom de service (rétrocompat)
+if [[ "$restarted" -eq 0 ]]; then
+  if try_systemctl_restart "bujitodigital-backend"; then
+    restarted=1
+  fi
+fi
+
+# 3) Reload gunicorn du projet si déjà lancé (fallback soft)
+if [[ "$restarted" -eq 0 ]]; then
+  if [[ -x "$ROOT_DIR/venv/bin/gunicorn" ]] && pgrep -f "$ROOT_DIR/venv/bin/gunicorn" >/dev/null 2>&1; then
+    log "reload gunicorn du projet (HUP)..."
+    pkill -HUP -f "$ROOT_DIR/venv/bin/gunicorn" || true
+    restarted=1
+  fi
+fi
+
+if [[ "$restarted" -eq 0 && -f gunicorn.pid ]]; then
   pid="$(tr -d '[:space:]' < gunicorn.pid || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     log "reload Gunicorn (HUP $pid)..."
@@ -84,28 +134,15 @@ if [[ -f gunicorn.pid ]]; then
   fi
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-  if systemctl cat bujitodigital-backend.service >/dev/null 2>&1; then
-    log "restart systemd bujitodigital-backend..."
-    if sudo -n systemctl restart bujitodigital-backend.service 2>/dev/null; then
-      restarted=1
-    elif systemctl restart bujitodigital-backend.service 2>/dev/null; then
-      restarted=1
-    else
-      log "systemd présent mais restart refusé (sudo sans mot de passe ?)"
-    fi
-  fi
-fi
-
 # cPanel / Passenger / Application Manager
 touch tmp/restart.txt
-if [[ -f passenger_wsgi.py || -f tmp/restart.txt ]]; then
+if [[ -f passenger_wsgi.py ]]; then
   log "Passenger/cPanel restart signal (tmp/restart.txt)"
   restarted=1
 fi
 
 if [[ "$restarted" -eq 0 ]]; then
-  log "aucun service redémarré automatiquement — redémarre l'app Python dans cPanel si besoin."
+  log "aucun service redémarré automatiquement — restart root requis (ex: systemctl restart ${SYSTEMD_SERVICE})."
 fi
 
 log "done"
