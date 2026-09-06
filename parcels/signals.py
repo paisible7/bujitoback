@@ -208,27 +208,12 @@ def _consolidation_pre_save(sender, instance: Consolidation, **kwargs):
 
 @receiver(post_save, sender=Consolidation)
 def _consolidation_post_save(sender, instance: Consolidation, created: bool, **kwargs):
-    user = instance.user
-    parcel_count = instance.parcels.count()
-
+    # La notif "nouvelle demande" est envoyée dans ParcelGroupView après
+    # parcels.set() — sinon post_save voit 0 colis (M2M pas encore lié).
     if created:
-        notify_admins(
-            "Nouvelle demande de groupage",
-            f"{user.email} demande le groupage de {parcel_count} colis (#{instance.pk}).",
-            type="consolidation",
-            reference_id=instance.pk,
-            data={"type": "consolidation", "reference_id": instance.pk},
-        )
-        send_fcm_notification(
-            user,
-            "Demande de groupage envoyee",
-            f"Votre demande de groupage #{instance.pk} ({parcel_count} colis) est en attente de validation.",
-            type="consolidation",
-            reference_id=instance.pk,
-            data={"type": "consolidation", "reference_id": instance.pk},
-        )
         return
 
+    user = instance.user
     old_status = getattr(instance, "_old_status", None)
     if old_status == instance.status:
         return
@@ -257,6 +242,7 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
             body,
             type="consolidation",
             reference_id=instance.pk,
+            image=instance.admin_note_image if instance.admin_note_image else None,
             data={
                 "type": "consolidation",
                 "reference_id": instance.pk,

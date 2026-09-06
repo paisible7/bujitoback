@@ -139,6 +139,12 @@ class Consolidation(models.Model):
         default='',
         verbose_name=_("Note admin (groupage)"),
     )
+    admin_note_image = models.ImageField(
+        upload_to='consolidations/',
+        blank=True,
+        null=True,
+        verbose_name=_("Photo note admin (groupage)"),
+    )
 
     class Meta:
         ordering = ['-request_date']

@@ -21,6 +21,7 @@ from .serializers import (
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from users.models import CustomUser
+from notifications.utils import notify_admins, send_fcm_notification
 
 class OrderListCreateView(generics.ListCreateAPIView):
     queryset = Order.objects.all()
@@ -161,7 +162,9 @@ class ParcelListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         if not self.request.user.is_authenticated:
             return Parcel.objects.none()
-        queryset = Parcel.objects.select_related('order__user')
+        queryset = Parcel.objects.select_related('order__user').prefetch_related(
+            'consolidations',
+        )
         if is_app_admin(self.request.user):
             return queryset
         return queryset.filter(order__user=self.request.user)
@@ -176,7 +179,9 @@ class ParcelListCreateView(generics.ListCreateAPIView):
 class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ParcelSerializer
     permission_classes = [IsAuthenticated]
-    queryset = Parcel.objects.all()
+    queryset = Parcel.objects.select_related('order__user').prefetch_related(
+        'consolidations',
+    )
     lookup_field = 'tracking_number' # Important pour matcher l'URL
 
     def get_object(self):
@@ -190,7 +195,10 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_update(self, serializer):
         if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
-        serializer.save()
+        parcel = serializer.save()
+        from .grouping import sync_completed_group_parcel_status
+
+        sync_completed_group_parcel_status(parcel)
 
 class ParcelTrackView(generics.RetrieveAPIView):
     serializer_class = ParcelSerializer
@@ -251,6 +259,24 @@ class ParcelGroupView(APIView):
 
             consolidation = Consolidation.objects.create(user=user, status='pending')
             consolidation.parcels.set(parcels_to_group)
+
+            # Notifier après liaison M2M (post_save à la création voit 0 colis).
+            parcel_count = len(parcels_to_group)
+            notify_admins(
+                "Nouvelle demande de groupage",
+                f"{user.email} demande le groupage de {parcel_count} colis (#{consolidation.pk}).",
+                type="consolidation",
+                reference_id=consolidation.pk,
+                data={"type": "consolidation", "reference_id": consolidation.pk},
+            )
+            send_fcm_notification(
+                user,
+                "Demande de groupage envoyee",
+                f"Votre demande de groupage #{consolidation.pk} ({parcel_count} colis) est en attente de validation.",
+                type="consolidation",
+                reference_id=consolidation.pk,
+                data={"type": "consolidation", "reference_id": consolidation.pk},
+            )
 
             response_serializer = ConsolidationSerializer(consolidation)
             return Response(response_serializer.data, status=status.HTTP_201_CREATED)

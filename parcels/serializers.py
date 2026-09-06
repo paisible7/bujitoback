@@ -16,6 +16,7 @@ class ParcelSerializer(serializers.ModelSerializer):
     package_photo = serializers.SerializerMethodField()
     user_email = serializers.SerializerMethodField()
     was_grouped = serializers.SerializerMethodField()
+    group_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Parcel
@@ -24,12 +25,16 @@ class ParcelSerializer(serializers.ModelSerializer):
             'order_sequence', 'status', 'current_location',
             'client_name', 'client_phone', 'weight_volume',
             'warehouse_number', 'description', 'image', 'package_photo',
-            'last_updated', 'order', 'user_email', 'was_grouped',
+            'last_updated', 'order', 'user_email', 'was_grouped', 'group_id',
         ]
         read_only_fields = ('last_updated',)
 
     def get_was_grouped(self, obj):
-        return obj.consolidations.exists()
+        return obj.consolidations.filter(status='completed').exists()
+
+    def get_group_id(self, obj):
+        group = obj.consolidations.filter(status='completed').order_by('-request_date').first()
+        return group.pk if group else None
 
     def get_image(self, obj):
         return self._absolute_image_url(obj)
@@ -300,14 +305,32 @@ class ConsolidationSerializer(serializers.ModelSerializer):
     group_name = serializers.SerializerMethodField()
     user = UserSerializer(read_only=True)
     parcels = serializers.SerializerMethodField()
+    admin_note_image = serializers.SerializerMethodField()
 
     class Meta:
         model = Consolidation
-        fields = ('id', 'group_name', 'user', 'parcels', 'request_date', 'created_at', 'status', 'admin_note')
+        fields = (
+            'id',
+            'group_name',
+            'user',
+            'parcels',
+            'request_date',
+            'created_at',
+            'status',
+            'admin_note',
+            'admin_note_image',
+        )
         read_only_fields = ('user', 'request_date', 'status')
 
     def get_group_name(self, obj):
         return f"{_('Groupage')} #{obj.id}"
+
+    def get_admin_note_image(self, obj):
+        return absolute_media_url(
+            obj.admin_note_image,
+            self.context.get('request'),
+            label='consolidation.admin_note_image',
+        )
 
     def get_parcels(self, obj):
         decisions = {
@@ -342,10 +365,11 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         required=False,
     )
     admin_note = serializers.CharField(required=False, allow_blank=True)
+    admin_note_image = serializers.ImageField(required=False, allow_null=True)
 
     class Meta:
         model = Consolidation
-        fields = ('status', 'parcel_id', 'decision', 'admin_note')
+        fields = ('status', 'parcel_id', 'decision', 'admin_note', 'admin_note_image')
 
     def validate_status(self, value):
         allowed = {'processing', 'completed', 'cancelled'}
@@ -361,12 +385,13 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         has_status = 'status' in attrs
         has_parcel = 'parcel_id' in attrs
         has_decision = 'decision' in attrs
+        has_image = 'admin_note_image' in attrs
 
         if has_parcel != has_decision:
             raise serializers.ValidationError(
                 "Indiquez parcel_id et decision ensemble pour valider un colis."
             )
-        if not has_status and not has_parcel:
+        if not has_status and not has_parcel and not has_image:
             raise serializers.ValidationError(
                 "Indiquez un status ou une décision de colis (parcel_id + decision)."
             )
@@ -393,6 +418,8 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         decision = validated_data.pop('decision', None)
         new_status = validated_data.get('status')
         admin_note = validated_data.get('admin_note')
+        has_image = 'admin_note_image' in validated_data
+        admin_note_image = validated_data.get('admin_note_image') if has_image else None
 
         with transaction.atomic():
             if parcel_id is not None and decision is not None:
@@ -404,6 +431,8 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
 
             if admin_note is not None:
                 instance.admin_note = admin_note.strip()
+            if has_image:
+                instance.admin_note_image = admin_note_image
 
             if new_status is not None:
                 instance.status = new_status
@@ -425,7 +454,12 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                                 consolidation=instance,
                                 parcel=parcel,
                             ).delete()
-            elif admin_note is not None:
-                instance.save(update_fields=['admin_note'])
+            elif admin_note is not None or has_image:
+                update_fields = []
+                if admin_note is not None:
+                    update_fields.append('admin_note')
+                if has_image:
+                    update_fields.append('admin_note_image')
+                instance.save(update_fields=update_fields)
 
         return instance
