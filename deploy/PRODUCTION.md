@@ -100,6 +100,37 @@ SERVE_MEDIA=True
 PAYMENT_WEBHOOK_SECRET=<secret>
 ```
 
+### Images `/media/` qui 404 (Flutter : « Invalid encoded image data »)
+
+Symptôme : l’URL `https://apibudig.capslockdev.com/media/...` renvoie du **HTML 404**, pas un JPEG.
+Le navigateur essaie de décoder la page HTML → `EncodingError`.
+
+Sur le VPS, vérifier :
+
+```bash
+cd ~/web/apibudig.capslockdev.com/public_html
+ls -la media/consolidations/ | head
+# Le fichier doit exister. Droits lecture pour le serveur web :
+chmod -R a+rX media
+```
+
+Puis **servir `/media/`** depuis ce dossier (Nginx ou Apache), **avant** le reverse proxy vers Gunicorn :
+
+- Exemple Nginx : `deploy/nginx-bujitodigital-backend.conf`
+- Exemple Apache : `deploy/apache-bujitodigital-backend.conf`
+
+Chemin correct :
+
+`/home/paisible/web/apibudig.capslockdev.com/public_html/media/`
+
+Alternative rapide (sans Alias) : faire proxy **tout** vers Gunicorn et garder `SERVE_MEDIA=True` dans `.env`, puis :
+
+```bash
+sudo systemctl restart bujito_backend
+```
+
+Test navigateur : ouvrir l’URL `/media/...` → doit afficher l’image (pas « Page Not Found »).
+
 ---
 
 ## C. App Flutter
