@@ -17,11 +17,13 @@ class PaymentInitiationTests(APITestCase):
             email="payer@example.com",
             password="test-password",
         )
-        self.method = PaymentMethod.objects.create(
-            name="Carte",
+        self.method, _ = PaymentMethod.objects.get_or_create(
             code="card",
-            is_active=True,
+            defaults={"name": "Carte", "is_active": True},
         )
+        if not self.method.is_active:
+            self.method.is_active = True
+            self.method.save(update_fields=["is_active"])
         self.client.force_authenticate(self.user)
         self.signal_notification = patch(
             "parcels.signals.send_fcm_notification",
@@ -39,7 +41,10 @@ class PaymentInitiationTests(APITestCase):
         return_value="https://checkout.example.test",
     )
     def test_quote_ready_order_can_only_have_one_pending_payment(self, _mock):
-        PaymentMethod.objects.create(name="Orange Money", code="orange_money", is_active=True)
+        PaymentMethod.objects.get_or_create(
+            code="orange_money",
+            defaults={"name": "Orange Money", "is_active": True},
+        )
         order = Order.objects.create(
             user=self.user,
             quote_ready=True,
@@ -147,11 +152,13 @@ class PaymentCompletionSignalTests(TransactionTestCase):
             email="confirmed@example.com",
             password="test-password",
         )
-        self.method = PaymentMethod.objects.create(
-            name="Carte",
+        self.method, _ = PaymentMethod.objects.get_or_create(
             code="card",
-            is_active=True,
+            defaults={"name": "Carte", "is_active": True},
         )
+        if not self.method.is_active:
+            self.method.is_active = True
+            self.method.save(update_fields=["is_active"])
         self.signal_notification = patch(
             "parcels.signals.send_fcm_notification",
         )

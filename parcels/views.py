@@ -222,6 +222,7 @@ class ParcelGroupView(APIView):
         serializer = ConsolidationCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         tracking_numbers = serializer.validated_data['tracking_numbers']
+        client_note = serializer.validated_data.get('client_note') or ''
 
         user = request.user
         eligible_statuses = ['pending']  # Uniquement « en attente » avant groupage
@@ -257,14 +258,24 @@ class ParcelGroupView(APIView):
                         status=status.HTTP_404_NOT_FOUND
                     )
 
-            consolidation = Consolidation.objects.create(user=user, status='pending')
+            consolidation = Consolidation.objects.create(
+                user=user,
+                status='pending',
+                client_note=client_note,
+            )
             consolidation.parcels.set(parcels_to_group)
 
             # Notifier après liaison M2M (post_save à la création voit 0 colis).
             parcel_count = len(parcels_to_group)
+            admin_body = (
+                f"{user.email} demande le groupage de {parcel_count} colis "
+                f"(#{consolidation.pk})."
+            )
+            if client_note:
+                admin_body = f"{admin_body} Description: {client_note}"
             notify_admins(
                 "Nouvelle demande de groupage",
-                f"{user.email} demande le groupage de {parcel_count} colis (#{consolidation.pk}).",
+                admin_body,
                 type="consolidation",
                 reference_id=consolidation.pk,
                 data={"type": "consolidation", "reference_id": consolidation.pk},
@@ -290,6 +301,7 @@ class ConsolidationListView(generics.ListAPIView):
         qs = Consolidation.objects.prefetch_related(
             'parcels',
             'parcel_decisions',
+            'note_images',
             'user',
         )
         if self.request.user.is_authenticated and is_app_admin(self.request.user):
@@ -299,7 +311,12 @@ class ConsolidationListView(generics.ListAPIView):
 class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = ConsolidationSerializer
     permission_classes = [IsAuthenticated]
-    queryset = Consolidation.objects.all()
+    queryset = Consolidation.objects.prefetch_related(
+        'parcels',
+        'parcel_decisions',
+        'note_images',
+        'user',
+    )
 
     def get_serializer_class(self):
         if self.request.method in ('PUT', 'PATCH'):

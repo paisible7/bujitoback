@@ -139,6 +139,11 @@ class Consolidation(models.Model):
         default='',
         verbose_name=_("Note admin (groupage)"),
     )
+    client_note = models.TextField(
+        blank=True,
+        default='',
+        verbose_name=_("Description client (demande)"),
+    )
     admin_note_image = models.ImageField(
         upload_to='consolidations/',
         blank=True,
@@ -153,6 +158,30 @@ class Consolidation(models.Model):
 
     def __str__(self):
         return f"Consolidation {self.id} - {self.user.email}"
+
+
+class ConsolidationNoteImage(models.Model):
+    """Photos jointes à la note admin lors de l'acceptation / refus d'un groupage."""
+
+    consolidation = models.ForeignKey(
+        Consolidation,
+        on_delete=models.CASCADE,
+        related_name='note_images',
+        verbose_name=_("Groupage"),
+    )
+    image = models.ImageField(
+        upload_to='consolidations/',
+        verbose_name=_("Image"),
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date d'upload"))
+
+    class Meta:
+        ordering = ['uploaded_at', 'id']
+        verbose_name = _("Photo note groupage")
+        verbose_name_plural = _("Photos note groupage")
+
+    def __str__(self):
+        return f"ConsolidationNoteImage {self.id} - Groupage {self.consolidation_id}"
 
 
 class ConsolidationParcelDecision(models.Model):

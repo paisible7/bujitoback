@@ -21,39 +21,81 @@ from .serializers import (
 from .services import PaymentService
 
 
+# Moyens affichés au checkout client (Mobile Money, Wave, carte).
+CHECKOUT_METHOD_SPECS = (
+    ("orange_money", "Mobile Money"),
+    ("wave", "Wave"),
+    ("card", "Carte bancaire"),
+)
+
+DEFAULT_METHOD_NAMES = {
+    "orange_money": "Mobile Money",
+    "mtn_momo": "MTN Mobile Money",
+    "wave": "Wave",
+    "moov": "Moov Money",
+    "card": "Carte bancaire",
+    "bank_transfer": "Virement bancaire",
+}
+
+MOBILE_MONEY_CODES = {"orange_money", "mtn_momo", "wave", "moov"}
+
+
+def _ensure_checkout_payment_methods():
+    """Crée / réactive Mobile Money, Wave et carte bancaire."""
+    for code, name in CHECKOUT_METHOD_SPECS:
+        obj, created = PaymentMethod.objects.get_or_create(
+            code=code,
+            defaults={"name": name, "is_active": True},
+        )
+        updates = []
+        if not obj.is_active:
+            obj.is_active = True
+            updates.append("is_active")
+        if obj.name != name:
+            obj.name = name
+            updates.append("name")
+        if updates:
+            obj.save(update_fields=updates)
+
+
 def _available_method_codes():
+    _ensure_checkout_payment_methods()
     codes = list(
         PaymentMethod.objects.filter(is_active=True)
         .values_list("code", flat=True)
     )
-    if codes:
-        return codes
-    # Fallback if DB is empty.
-    return [
-        "orange_money",
-        "mtn_momo",
-        "wave",
-        "moov",
-        "card",
-        "bank_transfer",
-    ]
+    # Ordre stable pour le checkout : Mobile Money → Wave → carte, puis le reste.
+    preferred = [c for c, _ in CHECKOUT_METHOD_SPECS]
+    ordered = [c for c in preferred if c in codes]
+    ordered.extend(c for c in codes if c not in ordered)
+    return ordered
 
 
 def _ensure_method(code: str) -> PaymentMethod:
     # Keep DB flexible: if not pre-seeded, create on demand (dev-friendly).
-    default_names = {
-        "orange_money": "Orange Money",
-        "mtn_momo": "MTN Mobile Money",
-        "wave": "Wave",
-        "moov": "Moov Money",
-        "card": "Carte bancaire",
-        "bank_transfer": "Virement bancaire",
-    }
     obj, _ = PaymentMethod.objects.get_or_create(
         code=code,
-        defaults={"name": default_names.get(code, code), "is_active": True},
+        defaults={
+            "name": DEFAULT_METHOD_NAMES.get(code, code),
+            "is_active": True,
+        },
     )
+    if not obj.is_active:
+        obj.is_active = True
+        obj.save(update_fields=["is_active"])
     return obj
+
+
+def _mock_ussd_code(method_code: str, phone_number: str) -> str:
+    digits = "".join(ch for ch in (phone_number or "") if ch.isdigit()) or "0000"
+    prefixes = {
+        "orange_money": "*144*",
+        "mtn_momo": "*105*",
+        "wave": "*145*",
+        "moov": "*155*",
+    }
+    prefix = prefixes.get(method_code, "*144*")
+    return f"{prefix}{digits}#"
 
 
 def _verify_webhook_signature(request) -> bool:
@@ -274,6 +316,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     provider_raw_response=meta,
                 )
 
+        ussd_code = None
         if simulate_card:
             raw = payment.provider_raw_response or {}
             if not isinstance(raw, dict):
@@ -294,6 +337,32 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             )
             checkout_url = None
             message = "Paiement confirmé"
+        elif method_code in MOBILE_MONEY_CODES and not is_transfer:
+            # Pas de lien externe : flux in-app (USSD simulé) pour Mobile Money / Wave.
+            ussd_code = _mock_ussd_code(method_code, phone_number)
+            raw = payment.provider_raw_response or {}
+            if not isinstance(raw, dict):
+                raw = {"previous": raw}
+            raw.update(
+                {
+                    "simulated": True,
+                    "method": method_code,
+                    "ussd_code": ussd_code,
+                }
+            )
+            payment.payment_url = None
+            payment.provider_raw_response = raw
+            payment.save(
+                update_fields=[
+                    "method",
+                    "phone_number",
+                    "payment_url",
+                    "provider_raw_response",
+                    "updated_at",
+                ]
+            )
+            checkout_url = None
+            message = "Composez le code USSD pour confirmer le paiement"
         else:
             checkout_url = PaymentService.initiate_payment(payment)
             message = "Transfert initié" if is_transfer else "Paiement initialisé"
@@ -304,7 +373,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             {
                 "transaction": tx,
                 "redirect_url": checkout_url,
-                "ussd_code": None,
+                "ussd_code": ussd_code,
                 "message": message,
             },
             status=status.HTTP_200_OK,

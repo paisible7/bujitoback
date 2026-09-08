@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage
+from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
 from .quote_utils import (
@@ -306,6 +306,7 @@ class ConsolidationSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     parcels = serializers.SerializerMethodField()
     admin_note_image = serializers.SerializerMethodField()
+    admin_note_images = serializers.SerializerMethodField()
 
     class Meta:
         model = Consolidation
@@ -318,19 +319,42 @@ class ConsolidationSerializer(serializers.ModelSerializer):
             'created_at',
             'status',
             'admin_note',
+            'client_note',
             'admin_note_image',
+            'admin_note_images',
         )
-        read_only_fields = ('user', 'request_date', 'status')
+        read_only_fields = ('user', 'request_date', 'status', 'client_note')
 
     def get_group_name(self, obj):
         return f"{_('Groupage')} #{obj.id}"
 
+    def _note_image_urls(self, obj):
+        request = self.context.get('request')
+        urls = []
+        for note_img in obj.note_images.all():
+            url = absolute_media_url(
+                note_img.image,
+                request,
+                label='consolidation.note_image',
+            )
+            if url:
+                urls.append(url)
+        if not urls and obj.admin_note_image:
+            url = absolute_media_url(
+                obj.admin_note_image,
+                request,
+                label='consolidation.admin_note_image',
+            )
+            if url:
+                urls.append(url)
+        return urls
+
+    def get_admin_note_images(self, obj):
+        return self._note_image_urls(obj)
+
     def get_admin_note_image(self, obj):
-        return absolute_media_url(
-            obj.admin_note_image,
-            self.context.get('request'),
-            label='consolidation.admin_note_image',
-        )
+        urls = self._note_image_urls(obj)
+        return urls[0] if urls else None
 
     def get_parcels(self, obj):
         decisions = {
@@ -351,11 +375,20 @@ class ConsolidationCreateSerializer(serializers.Serializer):
         min_length=2, # Un groupage nécessite au moins 2 colis
         help_text="Liste des numéros de suivi des colis à grouper."
     )
+    client_note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=2000,
+        help_text="Description / instructions du client pour la demande.",
+    )
 
     def validate_tracking_numbers(self, value):
         if len(value) > 500: # Limite de 500 colis comme spécifié
             raise serializers.ValidationError("Vous ne pouvez pas grouper plus de 500 colis à la fois.")
         return value
+
+    def validate_client_note(self, value):
+        return (value or '').strip()
 
 
 class ConsolidationUpdateSerializer(serializers.ModelSerializer):
@@ -381,11 +414,20 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Ce groupage est déjà finalisé.")
         return value
 
+    def _uploaded_note_images(self):
+        request = self.context.get('request')
+        if request is None:
+            return []
+        files = list(request.FILES.getlist('admin_note_images'))
+        if not files and request.FILES.get('admin_note_image'):
+            files = [request.FILES['admin_note_image']]
+        return files
+
     def validate(self, attrs):
         has_status = 'status' in attrs
         has_parcel = 'parcel_id' in attrs
         has_decision = 'decision' in attrs
-        has_image = 'admin_note_image' in attrs
+        has_image = 'admin_note_image' in attrs or bool(self._uploaded_note_images())
 
         if has_parcel != has_decision:
             raise serializers.ValidationError(
@@ -418,8 +460,9 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         decision = validated_data.pop('decision', None)
         new_status = validated_data.get('status')
         admin_note = validated_data.get('admin_note')
-        has_image = 'admin_note_image' in validated_data
-        admin_note_image = validated_data.get('admin_note_image') if has_image else None
+        uploaded_images = self._uploaded_note_images()
+        has_legacy_image = 'admin_note_image' in validated_data
+        legacy_image = validated_data.get('admin_note_image') if has_legacy_image else None
 
         with transaction.atomic():
             if parcel_id is not None and decision is not None:
@@ -431,8 +474,22 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
 
             if admin_note is not None:
                 instance.admin_note = admin_note.strip()
-            if has_image:
-                instance.admin_note_image = admin_note_image
+
+            if uploaded_images:
+                instance.note_images.all().delete()
+                for uploaded in uploaded_images:
+                    ConsolidationNoteImage.objects.create(
+                        consolidation=instance,
+                        image=uploaded,
+                    )
+                instance.admin_note_image = uploaded_images[0]
+            elif has_legacy_image:
+                instance.admin_note_image = legacy_image
+                if legacy_image is not None:
+                    ConsolidationNoteImage.objects.create(
+                        consolidation=instance,
+                        image=legacy_image,
+                    )
 
             if new_status is not None:
                 instance.status = new_status
@@ -454,11 +511,11 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                                 consolidation=instance,
                                 parcel=parcel,
                             ).delete()
-            elif admin_note is not None or has_image:
+            elif admin_note is not None or uploaded_images or has_legacy_image:
                 update_fields = []
                 if admin_note is not None:
                     update_fields.append('admin_note')
-                if has_image:
+                if uploaded_images or has_legacy_image:
                     update_fields.append('admin_note_image')
                 instance.save(update_fields=update_fields)
 

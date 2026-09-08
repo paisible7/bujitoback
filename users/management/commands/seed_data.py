@@ -135,16 +135,20 @@ class Command(BaseCommand):
 
     def _ensure_payment_methods(self):
         specs = [
-            ('Orange Money', 'orange_money'),
+            ('Mobile Money', 'orange_money'),
             ('Wave', 'wave'),
             ('Carte bancaire', 'card'),
         ]
         methods = {}
         for name, code in specs:
-            m, _ = PaymentMethod.objects.get_or_create(
+            m, created = PaymentMethod.objects.get_or_create(
                 code=code,
                 defaults={'name': name, 'is_active': True},
             )
+            if not created and (not m.is_active or m.name != name):
+                m.name = name
+                m.is_active = True
+                m.save(update_fields=['name', 'is_active'])
             methods[code] = m
         return methods
 
