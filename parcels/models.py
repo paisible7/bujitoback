@@ -102,7 +102,19 @@ class Parcel(models.Model):
     client_name = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("Nom du client"))
     client_phone = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Téléphone client"))
     weight_volume = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("Poids/Volume"))
+    weight_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name=_("Poids (kg)"),
+    )
     warehouse_number = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("N° Entrepôt"))
+    china_arrival_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name=_("Date d'arrivée Chine"),
+    )
 
     description = models.TextField(blank=True, null=True, verbose_name=_("Description"))
     image = models.ImageField(upload_to='parcels/', blank=True, null=True, verbose_name=_("Image"))
@@ -143,6 +155,27 @@ class Consolidation(models.Model):
         blank=True,
         default='',
         verbose_name=_("Description client (demande)"),
+    )
+    weight_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name=_("Poids réel (kg)"),
+    )
+    billable_weight_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("Poids facturable (kg)"),
+    )
+    grouping_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("Frais de groupage (USD)"),
     )
     admin_note_image = models.ImageField(
         upload_to='consolidations/',
@@ -255,3 +288,44 @@ class ImportBatch(models.Model):
 
     def __str__(self):
         return f"{self.file_name} ({self.created_at:%Y-%m-%d %H:%M})"
+
+
+class ShipmentBatch(models.Model):
+    """Lot d'expédition MCO (agrégation de colis groupés, 22–46 kg)."""
+
+    STATUS_CHOICES = [
+        ('open', _('Ouvert')),
+        ('shipped', _('Expédié')),
+        ('closed', _('Fermé')),
+    ]
+
+    code = models.CharField(max_length=50, unique=True, verbose_name=_("Code MCO"))
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='open',
+        verbose_name=_("Statut"),
+    )
+    total_weight_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        default=0,
+        verbose_name=_("Poids total (kg)"),
+    )
+    parcels = models.ManyToManyField(
+        Parcel,
+        related_name='shipment_batches',
+        blank=True,
+        verbose_name=_("Colis"),
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Créé le"))
+    shipped_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Expédié le"))
+    notes = models.TextField(blank=True, default='', verbose_name=_("Notes"))
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = _("Lot MCO")
+        verbose_name_plural = _("Lots MCO")
+
+    def __str__(self):
+        return self.code

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage
+from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage, ShipmentBatch
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
 from .quote_utils import (
@@ -17,17 +17,19 @@ class ParcelSerializer(serializers.ModelSerializer):
     user_email = serializers.SerializerMethodField()
     was_grouped = serializers.SerializerMethodField()
     group_id = serializers.SerializerMethodField()
+    mco_code = serializers.SerializerMethodField()
 
     class Meta:
         model = Parcel
         fields = [
             'id', 'tracking_number', 'supplier_tracking_number',
             'order_sequence', 'status', 'current_location',
-            'client_name', 'client_phone', 'weight_volume',
-            'warehouse_number', 'description', 'image', 'package_photo',
-            'last_updated', 'order', 'user_email', 'was_grouped', 'group_id',
+            'client_name', 'client_phone', 'weight_volume', 'weight_kg',
+            'warehouse_number', 'china_arrival_date', 'description',
+            'image', 'package_photo', 'last_updated', 'order',
+            'user_email', 'was_grouped', 'group_id', 'mco_code',
         ]
-        read_only_fields = ('last_updated',)
+        read_only_fields = ('last_updated', 'mco_code')
 
     def get_was_grouped(self, obj):
         return obj.consolidations.filter(status='completed').exists()
@@ -35,6 +37,13 @@ class ParcelSerializer(serializers.ModelSerializer):
     def get_group_id(self, obj):
         group = obj.consolidations.filter(status='completed').order_by('-request_date').first()
         return group.pk if group else None
+
+    def get_mco_code(self, obj):
+        batches = list(obj.shipment_batches.all())
+        if not batches:
+            return None
+        batches.sort(key=lambda b: b.created_at or b.pk, reverse=True)
+        return batches[0].code
 
     def get_image(self, obj):
         return self._absolute_image_url(obj)
@@ -54,6 +63,24 @@ class ParcelSerializer(serializers.ModelSerializer):
             label=f'Parcel #{obj.pk} ({obj.tracking_number})',
         )
 
+
+class ShipmentBatchSerializer(serializers.ModelSerializer):
+    parcel_count = serializers.SerializerMethodField()
+    tracking_numbers = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ShipmentBatch
+        fields = [
+            'id', 'code', 'status', 'total_weight_kg', 'parcel_count',
+            'tracking_numbers', 'created_at', 'shipped_at', 'notes',
+        ]
+        read_only_fields = ('code', 'total_weight_kg', 'created_at', 'shipped_at')
+
+    def get_parcel_count(self, obj):
+        return obj.parcels.count()
+
+    def get_tracking_numbers(self, obj):
+        return list(obj.parcels.values_list('tracking_number', flat=True))
 
 class OrderImageSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
@@ -320,10 +347,19 @@ class ConsolidationSerializer(serializers.ModelSerializer):
             'status',
             'admin_note',
             'client_note',
+            'weight_kg',
+            'billable_weight_kg',
+            'grouping_fee',
             'admin_note_image',
             'admin_note_images',
         )
-        read_only_fields = ('user', 'request_date', 'status', 'client_note')
+        read_only_fields = (
+            'user',
+            'request_date',
+            'status',
+            'client_note',
+            'billable_weight_kg',
+        )
 
     def get_group_name(self, obj):
         return f"{_('Groupage')} #{obj.id}"
@@ -399,19 +435,39 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
     )
     admin_note = serializers.CharField(required=False, allow_blank=True)
     admin_note_image = serializers.ImageField(required=False, allow_null=True)
+    weight_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        required=False,
+        allow_null=True,
+        min_value=0,
+    )
+    grouping_fee = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=0,
+    )
 
     class Meta:
         model = Consolidation
-        fields = ('status', 'parcel_id', 'decision', 'admin_note', 'admin_note_image')
+        fields = (
+            'status',
+            'parcel_id',
+            'decision',
+            'admin_note',
+            'admin_note_image',
+            'weight_kg',
+            'grouping_fee',
+        )
 
     def validate_status(self, value):
-        allowed = {'processing', 'completed', 'cancelled'}
+        allowed = {'pending', 'processing', 'completed', 'cancelled'}
         if value not in allowed:
             raise serializers.ValidationError(
-                "Statut invalide. Valeurs autorisées : processing, completed, cancelled."
+                "Statut invalide. Valeurs autorisées : pending, processing, completed, cancelled."
             )
-        if self.instance and self.instance.status in ('completed', 'cancelled'):
-            raise serializers.ValidationError("Ce groupage est déjà finalisé.")
         return value
 
     def _uploaded_note_images(self):
@@ -424,32 +480,55 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         return files
 
     def validate(self, attrs):
+        from pricing.utils import billable_weight_kg, grouping_cost
+
         has_status = 'status' in attrs
         has_parcel = 'parcel_id' in attrs
         has_decision = 'decision' in attrs
         has_image = 'admin_note_image' in attrs or bool(self._uploaded_note_images())
+        has_weight = 'weight_kg' in attrs
+        has_fee = 'grouping_fee' in attrs
 
         if has_parcel != has_decision:
             raise serializers.ValidationError(
                 "Indiquez parcel_id et decision ensemble pour valider un colis."
             )
-        if not has_status and not has_parcel and not has_image:
+        if not any([has_status, has_parcel, has_image, has_weight, has_fee, 'admin_note' in attrs]):
             raise serializers.ValidationError(
-                "Indiquez un status ou une décision de colis (parcel_id + decision)."
+                "Indiquez un status, un poids/frais, une note ou une décision de colis."
             )
 
         if has_parcel and self.instance is not None:
-            if self.instance.status in ('completed', 'cancelled'):
-                raise serializers.ValidationError("Ce groupage est déjà finalisé.")
             if not self.instance.parcels.filter(pk=attrs['parcel_id']).exists():
-                raise serializers.ValidationError("Ce colis ne fait pas partie de ce groupage.")
+                raise serializers.ValidationError(
+                    "Ce colis ne fait pas partie de ce groupage."
+                )
 
-        if attrs.get('status') == 'completed':
+        target_status = attrs.get('status')
+        if target_status == 'completed':
             note = (attrs.get('admin_note') or '').strip()
+            if not note and self.instance is not None:
+                note = (self.instance.admin_note or '').strip()
             if not note:
                 raise serializers.ValidationError(
                     {"admin_note": "Ajoutez une note descriptive pour notifier le client."}
                 )
+            weight = attrs.get('weight_kg')
+            if weight is None and self.instance is not None:
+                weight = self.instance.weight_kg
+            if weight is None or weight <= 0:
+                raise serializers.ValidationError(
+                    {"weight_kg": "Indiquez le poids du groupage (kg)."}
+                )
+
+        if has_weight and attrs.get('weight_kg') is not None:
+            weight = attrs['weight_kg']
+            billable = billable_weight_kg(weight)
+            attrs['_billable_weight_kg'] = billable
+            if not has_fee or attrs.get('grouping_fee') is None:
+                from decimal import Decimal
+                calc = grouping_cost(weight_kg=weight)
+                attrs['grouping_fee'] = Decimal(str(calc['amount_usd']))
 
         return attrs
 
@@ -463,6 +542,11 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
         uploaded_images = self._uploaded_note_images()
         has_legacy_image = 'admin_note_image' in validated_data
         legacy_image = validated_data.get('admin_note_image') if has_legacy_image else None
+        billable = validated_data.pop('_billable_weight_kg', None)
+        has_weight = 'weight_kg' in validated_data
+        has_fee = 'grouping_fee' in validated_data
+        weight_kg = validated_data.get('weight_kg') if has_weight else None
+        grouping_fee = validated_data.get('grouping_fee') if has_fee else None
 
         with transaction.atomic():
             if parcel_id is not None and decision is not None:
@@ -474,6 +558,15 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
 
             if admin_note is not None:
                 instance.admin_note = admin_note.strip()
+
+            if has_weight:
+                instance.weight_kg = weight_kg
+                if billable is not None:
+                    instance.billable_weight_kg = billable
+                elif weight_kg is None:
+                    instance.billable_weight_kg = None
+            if has_fee:
+                instance.grouping_fee = grouping_fee
 
             if uploaded_images:
                 instance.note_images.all().delete()
@@ -491,16 +584,26 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                         image=legacy_image,
                     )
 
+            update_fields = set()
+            if admin_note is not None:
+                update_fields.add('admin_note')
+            if has_weight:
+                update_fields.update({'weight_kg', 'billable_weight_kg'})
+            if has_fee:
+                update_fields.add('grouping_fee')
+            if uploaded_images or has_legacy_image:
+                update_fields.add('admin_note_image')
+
             if new_status is not None:
                 instance.status = new_status
-                instance.save()
+                update_fields.add('status')
+                instance.save(update_fields=list(update_fields) or None)
                 if new_status == 'completed':
                     decisions = {
                         d.parcel_id: d.decision
                         for d in instance.parcel_decisions.all()
                     }
                     for parcel in list(instance.parcels.all()):
-                        # Sans décision explicite → validé (rétrocompat)
                         parcel_decision = decisions.get(parcel.id, 'accepted')
                         if parcel_decision == 'accepted' and parcel.status != 'consolidated':
                             parcel.status = 'consolidated'
@@ -511,12 +614,7 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                                 consolidation=instance,
                                 parcel=parcel,
                             ).delete()
-            elif admin_note is not None or uploaded_images or has_legacy_image:
-                update_fields = []
-                if admin_note is not None:
-                    update_fields.append('admin_note')
-                if uploaded_images or has_legacy_image:
-                    update_fields.append('admin_note_image')
-                instance.save(update_fields=update_fields)
+            elif update_fields:
+                instance.save(update_fields=list(update_fields))
 
         return instance

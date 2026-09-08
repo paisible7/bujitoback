@@ -64,6 +64,19 @@ class NotificationViewSet(viewsets.ModelViewSet):
             if isinstance(val, str):
                 mutable['send_to_all'] = val.lower() in ('1', 'true', 'yes', 'on')
 
+        # Multipart: user_ids peut arriver en JSON string
+        if 'user_ids' in mutable:
+            import json
+            raw_ids = mutable.get('user_ids')
+            if isinstance(raw_ids, str):
+                try:
+                    mutable['user_ids'] = json.loads(raw_ids)
+                except json.JSONDecodeError:
+                    # Forme "1,2,3"
+                    mutable['user_ids'] = [
+                        int(x.strip()) for x in raw_ids.split(',') if x.strip().isdigit()
+                    ]
+
         serializer = AdminSendNotificationSerializer(data=mutable)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -71,7 +84,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
         if data.get('send_to_all'):
             recipients = User.objects.filter(role__in=CLIENT_ROLES, is_active=True)
         else:
-            recipients = User.objects.filter(pk=data['user_id'])
+            recipients = User.objects.filter(pk__in=data.get('user_ids') or [])
 
         image_file = data.get('image') or request.FILES.get('image')
         image_bytes = None
@@ -82,6 +95,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
         sent_count = 0
         push_count = 0
+        failed = []
         for user in recipients:
             result = send_fcm_notification(
                 user,
@@ -96,10 +110,13 @@ class NotificationViewSet(viewsets.ModelViewSet):
             sent_count += 1
             if result.get('success'):
                 push_count += 1
+            else:
+                failed.append(user.pk)
 
         return Response({
             "sent_count": sent_count,
             "push_count": push_count,
-            "total_recipients": recipients.count(),
+            "failed": failed,
+            "total_recipients": recipients.count() if hasattr(recipients, 'count') else len(list(recipients)),
             "message": f"Notification envoyée à {sent_count} client(s).",
         }, status=status.HTTP_200_OK)

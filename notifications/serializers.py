@@ -35,6 +35,11 @@ class AdminSendNotificationSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
     message = serializers.CharField()
     user_id = serializers.IntegerField(required=False)
+    user_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=False,
+    )
     send_to_all = serializers.BooleanField(default=False)
     type = serializers.CharField(max_length=50, default='general', required=False)
     image = serializers.ImageField(required=False, allow_null=True)
@@ -42,13 +47,22 @@ class AdminSendNotificationSerializer(serializers.Serializer):
     def validate(self, attrs):
         send_to_all = attrs.get('send_to_all', False)
         user_id = attrs.get('user_id')
-        if send_to_all and user_id is not None:
+        user_ids = attrs.get('user_ids')
+
+        if send_to_all and (user_id is not None or user_ids):
             raise serializers.ValidationError(
-                "Choisissez un destinataire ou l'envoi à tous les clients, pas les deux."
+                "Choisissez des destinataires ou l'envoi à tous les clients, pas les deux."
             )
-        if not send_to_all and user_id is None:
+
+        # Normaliser en user_ids
+        resolved = list(user_ids or [])
+        if user_id is not None and user_id not in resolved:
+            resolved.append(user_id)
+        attrs['user_ids'] = resolved
+
+        if not send_to_all and not resolved:
             raise serializers.ValidationError(
-                "Indiquez user_id ou activez send_to_all."
+                "Indiquez user_ids (ou user_id) ou activez send_to_all."
             )
         return attrs
 
@@ -57,3 +71,17 @@ class AdminSendNotificationSerializer(serializers.Serializer):
         if not User.objects.filter(pk=value, role__in=CLIENT_ROLES, is_active=True).exists():
             raise serializers.ValidationError("Utilisateur client introuvable.")
         return value
+
+    def validate_user_ids(self, value):
+        from users.roles import CLIENT_ROLES
+        unique = list(dict.fromkeys(value))
+        found = set(
+            User.objects.filter(pk__in=unique, role__in=CLIENT_ROLES, is_active=True)
+            .values_list('pk', flat=True)
+        )
+        missing = [uid for uid in unique if uid not in found]
+        if missing:
+            raise serializers.ValidationError(
+                f"Clients introuvables ou inactifs: {missing}"
+            )
+        return unique
