@@ -247,6 +247,116 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class OrderClientUpdateSerializer(serializers.ModelSerializer):
+    """Client : modifier le contenu avant paiement → invalide le devis."""
+
+    product_links = serializers.JSONField(required=False, allow_null=True)
+    packages = serializers.JSONField(required=False, allow_null=True)
+    client_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    client_phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    country = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    city = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    quantity = serializers.IntegerField(required=False, min_value=1)
+    comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    expected_parcel_count = serializers.IntegerField(
+        required=False, min_value=1, max_value=100
+    )
+
+    class Meta:
+        model = Order
+        fields = [
+            'client_name', 'client_phone', 'country', 'city',
+            'product_links', 'packages', 'quantity', 'comment',
+            'expected_parcel_count',
+        ]
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is None:
+            return attrs
+        if instance.payments.filter(status='completed').exists():
+            raise serializers.ValidationError(
+                "Cette commande ne peut plus être modifiée après confirmation du paiement."
+            )
+        if instance.parcels.exists():
+            raise serializers.ValidationError(
+                "Cette commande ne peut plus être modifiée : des colis existent déjà."
+            )
+        if instance.status == 'cancelled':
+            raise serializers.ValidationError(
+                "Une commande annulée ne peut pas être modifiée."
+            )
+        return attrs
+
+    def update(self, instance, validated_data):
+        import json
+
+        packages = validated_data.pop('packages', None)
+        if isinstance(packages, str):
+            try:
+                packages = json.loads(packages)
+            except Exception:
+                packages = None
+        links = validated_data.pop('product_links', serializers.empty)
+        expected = validated_data.pop('expected_parcel_count', None)
+
+        items = []
+        aggregated_comment = None
+        package_count = 0
+        if packages:
+            items, package_count, aggregated_comment = flatten_packages(packages)
+        elif links is not serializers.empty:
+            items = normalize_incoming_links(links)
+        else:
+            items = parse_product_items(instance.product_links)
+
+        # Pas de prix côté client — le devis admin les recalculera.
+        cleaned_items = []
+        for entry in items:
+            cleaned = {
+                'url': str(entry.get('url') or '').strip(),
+                'description': str(entry.get('description') or '').strip(),
+                'quantity': max(1, int(entry.get('quantity') or 1)),
+            }
+            pkg = entry.get('package_index')
+            if pkg is not None and pkg != '':
+                try:
+                    cleaned['package_index'] = max(0, int(pkg))
+                except (TypeError, ValueError):
+                    pass
+            if cleaned['url'] or cleaned['description']:
+                cleaned_items.append(cleaned)
+
+        if not cleaned_items and not packages:
+            raise serializers.ValidationError(
+                "Ajoutez au moins un lien produit ou une description."
+            )
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+
+        instance.product_links = dump_product_items(cleaned_items)
+        instance.quantity = total_items_quantity(cleaned_items) or 1
+        instance.total_amount = 0
+        instance.withdrawal_fee = 0
+        instance.commission_fee = 0
+        instance.quote_ready = False
+        if expected is not None:
+            instance.expected_parcel_count = expected
+        elif package_count > 0:
+            instance.expected_parcel_count = package_count
+
+        if aggregated_comment and not (instance.comment or '').strip():
+            instance.comment = aggregated_comment
+
+        # Annuler les paiements encore en attente (devis invalidé).
+        instance.payments.filter(status='pending').update(status='cancelled')
+
+        instance._client_edited = True
+        instance.save()
+        return instance
+
+
 class OrderQuoteSerializer(serializers.Serializer):
     """Admin : lignes du devis + frais (retrait, commission) → total recalculé."""
     product_items = serializers.ListField(

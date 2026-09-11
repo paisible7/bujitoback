@@ -141,6 +141,35 @@ def _order_post_save(sender, instance: Order, created: bool, **kwargs):
         )
         return
 
+    if getattr(instance, "_client_edited", False):
+        client_name = (user.full_name or instance.client_name or user.email).strip()
+        notify_admins(
+            "Commande modifiée",
+            (
+                f"{client_name} ({user.email}) a modifié la commande "
+                f"#{instance.pk}. Un nouveau devis est requis."
+            ),
+            type="order",
+            reference_id=instance.pk,
+            data={
+                "type": "order",
+                "reference_id": instance.pk,
+                "action": "quote",
+            },
+        )
+        send_fcm_notification(
+            user,
+            "Commande mise à jour",
+            (
+                f"Votre commande #{instance.pk} a été mise à jour. "
+                "Un nouveau devis vous sera envoyé."
+            ),
+            type="order",
+            reference_id=instance.pk,
+            data={"type": "order", "reference_id": instance.pk, "action": "edited"},
+        )
+        return
+
     old_status = getattr(instance, "_old_status", None)
     old_quote_ready = getattr(instance, "_old_quote_ready", False)
     old_total_amount = getattr(instance, "_old_total_amount", None)

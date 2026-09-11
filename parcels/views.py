@@ -14,6 +14,7 @@ from .serializers import (
     OrderSerializer,
     ParcelSerializer,
     OrderCreateSerializer,
+    OrderClientUpdateSerializer,
     OrderQuoteSerializer,
     ConsolidationSerializer,
     ConsolidationCreateSerializer,
@@ -95,25 +96,96 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         obj = super().get_object()
+        user = self.request.user
+        is_owner = obj.user_id == user.id
+        admin = is_app_admin(user)
+
         if self.request.method in ('GET', 'HEAD', 'OPTIONS'):
-            if obj.user != self.request.user and (not is_app_admin(self.request.user)):
+            if not is_owner and not admin:
                 self.permission_denied(self.request)
             return obj
-        if (not is_app_admin(self.request.user)):
-            self.permission_denied(self.request)
+
+        # Mise à jour : admin, ou propriétaire avant paiement / sans colis.
+        if admin:
+            return obj
+        if (
+            is_owner
+            and not obj.payments.filter(status='completed').exists()
+            and not obj.parcels.exists()
+            and obj.status != 'cancelled'
+        ):
+            return obj
+        self.permission_denied(self.request)
         return obj
 
     def get_serializer_class(self):
         if self.request.method in ('PUT', 'PATCH'):
             data = self.request.data
-            # Devis admin : product_items + frais
-            if (
+            if is_app_admin(self.request.user) and (
                 'product_items' in data
                 or 'withdrawal_fee' in data
                 or 'commission_fee' in data
             ):
                 return OrderQuoteSerializer
+            if not is_app_admin(self.request.user):
+                return OrderClientUpdateSerializer
         return OrderSerializer
+
+    def _sync_order_images(self, order, request):
+        """Remplace / conserve les images selon keep_image_ids + nouveaux uploads."""
+        uploads = request.FILES.getlist('images')
+        keep_raw = request.data.get('keep_image_ids', None)
+        if keep_raw is None and not uploads:
+            return
+
+        keep_ids = []
+        if keep_raw is not None:
+            if isinstance(keep_raw, str) and keep_raw.strip():
+                for part in keep_raw.split(','):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    try:
+                        keep_ids.append(int(part))
+                    except ValueError:
+                        continue
+            elif isinstance(keep_raw, list):
+                for part in keep_raw:
+                    try:
+                        keep_ids.append(int(part))
+                    except (TypeError, ValueError):
+                        continue
+
+        if keep_raw is not None:
+            order.images.exclude(id__in=keep_ids).delete()
+        elif uploads:
+            order.images.all().delete()
+
+        indexes_raw = request.data.get('image_package_indexes', '')
+        index_list = []
+        if isinstance(indexes_raw, str) and indexes_raw.strip():
+            for part in indexes_raw.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    index_list.append(max(0, int(part)))
+                except ValueError:
+                    index_list.append(0)
+        elif isinstance(indexes_raw, list):
+            for part in indexes_raw:
+                try:
+                    index_list.append(max(0, int(part)))
+                except (TypeError, ValueError):
+                    index_list.append(0)
+
+        for i, uploaded in enumerate(uploads):
+            pkg_index = index_list[i] if i < len(index_list) else 0
+            OrderImage.objects.create(
+                order=order,
+                image=uploaded,
+                package_index=pkg_index,
+            )
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -121,10 +193,26 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
         serializer_class = self.get_serializer_class()
 
         if serializer_class is OrderQuoteSerializer:
-            serializer = OrderQuoteSerializer(instance, data=request.data, partial=partial)
+            serializer = OrderQuoteSerializer(
+                instance, data=request.data, partial=partial
+            )
             serializer.is_valid(raise_exception=True)
             order = serializer.save()
-            return Response(OrderSerializer(order, context={'request': request}).data)
+            return Response(
+                OrderSerializer(order, context={'request': request}).data
+            )
+
+        if serializer_class is OrderClientUpdateSerializer:
+            serializer = OrderClientUpdateSerializer(
+                instance, data=request.data, partial=partial
+            )
+            serializer.is_valid(raise_exception=True)
+            order = serializer.save()
+            self._sync_order_images(order, request)
+            order.refresh_from_db()
+            return Response(
+                OrderSerializer(order, context={'request': request}).data
+            )
 
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
