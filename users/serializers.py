@@ -12,30 +12,66 @@ from .roles import (
 
 User = get_user_model()
 
+# Adresse entrepôt Chine (fixe) pour les clients
+WAREHOUSE_PHONE = '18575740344'
+WAREHOUSE_STREET = '佛山市南海区狮山镇塘头村一队新一巷3号bujito'
+
+
+def build_china_warehouse_address(full_name: str, phone_number, city: str) -> str:
+    """Adresse à coller sur les colis Chine : BU.Nom + entrepôt + (nom tél ville)."""
+    name = (full_name or '').strip() or 'Client'
+    phone = (phone_number or '').strip()
+    ville = (city or '').strip()
+    paren_parts = [p for p in (name, phone, ville) if p]
+    paren = ' '.join(paren_parts)
+    return f'BU.{name} {WAREHOUSE_PHONE} {WAREHOUSE_STREET} ( {paren} )'
+
 
 class UserSerializer(serializers.ModelSerializer):
+    china_warehouse_address = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ('id', 'email', 'role', 'full_name', 'phone_number', 'is_active')
+        fields = (
+            'id', 'email', 'role', 'full_name', 'phone_number', 'city',
+            'is_active', 'china_warehouse_address',
+        )
+
+    def get_china_warehouse_address(self, obj):
+        return build_china_warehouse_address(
+            obj.full_name,
+            obj.phone_number,
+            getattr(obj, 'city', '') or '',
+        )
 
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
     full_name = serializers.CharField(required=False, allow_blank=True, default='')
     phone_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    city = serializers.CharField(required=True, allow_blank=False, max_length=100)
 
     class Meta:
         model = User
-        fields = ('email', 'password', 'full_name', 'phone_number')
+        fields = ('email', 'password', 'full_name', 'phone_number', 'city')
+
+    def validate_city(self, value):
+        city = (value or '').strip()
+        if not city:
+            raise serializers.ValidationError('La ville est obligatoire.')
+        return city
 
     def create(self, validated_data):
-        # Inscription publique = client uniquement
+        phone = validated_data.get('phone_number') or None
+        if phone is not None and str(phone).strip() == '':
+            phone = None
         return User.objects.create_user(
             email=validated_data['email'],
             password=validated_data['password'],
             role=ROLE_CLIENT,
             full_name=validated_data.get('full_name', ''),
-            phone_number=validated_data.get('phone_number', None),
+            phone_number=phone,
+            city=validated_data.get('city', ''),
         )
 
 
@@ -46,6 +82,7 @@ class AdminCreateUserSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, min_length=6)
     full_name = serializers.CharField(required=False, allow_blank=True, default='')
     phone_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    city = serializers.CharField(required=False, allow_blank=True, default='')
     role = serializers.ChoiceField(
         choices=[ROLE_CLIENT, ROLE_ADMIN],
         default=ROLE_CLIENT,
@@ -56,6 +93,16 @@ class AdminCreateUserSerializer(serializers.Serializer):
         if User.objects.filter(email__iexact=email).exists():
             raise serializers.ValidationError('Un compte existe déjà avec cet email.')
         return email
+
+    def validate(self, attrs):
+        role = normalize_role(attrs.get('role', ROLE_CLIENT))
+        city = (attrs.get('city') or '').strip()
+        attrs['city'] = city
+        if role == ROLE_CLIENT and not city:
+            raise serializers.ValidationError({
+                'city': 'La ville est obligatoire pour un client.',
+            })
+        return attrs
 
     def validate_role(self, value):
         role = normalize_role(value)
@@ -83,6 +130,7 @@ class AdminCreateUserSerializer(serializers.Serializer):
             role=validated_data.get('role', ROLE_CLIENT),
             full_name=validated_data.get('full_name', ''),
             phone_number=phone,
+            city=validated_data.get('city', ''),
         )
 
 
@@ -128,6 +176,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'role': normalize_role(user.role),
             'full_name': user.full_name,
             'phone_number': user.phone_number,
+            'city': getattr(user, 'city', '') or '',
+            'china_warehouse_address': build_china_warehouse_address(
+                user.full_name,
+                user.phone_number,
+                getattr(user, 'city', '') or '',
+            ),
         }
         print(f'[auth/login.validate] OK user_id={user.pk} role={data["role"]}')
         return data

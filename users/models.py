@@ -35,6 +35,7 @@ class CustomUser(AbstractUser):
     email = models.EmailField(_('email address'), unique=True)
     phone_number = models.CharField(max_length=20, unique=True, blank=True, null=True)
     full_name = models.CharField(max_length=255, blank=True, default='')
+    city = models.CharField(max_length=100, blank=True, default='', verbose_name=_('Ville'))
     role = models.CharField(
         max_length=20,
         choices=ROLE_CHOICES,

@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'payments.apps.PaymentsConfig',
     'orders',
     'pricing.apps.PricingConfig',
+    'ads.apps.AdsConfig',
 ]
 
 MIDDLEWARE = [

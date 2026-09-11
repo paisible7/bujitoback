@@ -134,6 +134,29 @@ class Parcel(models.Model):
     def __str__(self):
         return self.tracking_number or f"Parcel {self.pk}"
 
+
+class ParcelImage(models.Model):
+    """Photos supplémentaires d'un colis (la photo principale reste Parcel.image)."""
+
+    parcel = models.ForeignKey(
+        Parcel,
+        on_delete=models.CASCADE,
+        related_name='extra_images',
+        verbose_name=_("Colis"),
+    )
+    image = models.ImageField(upload_to='parcels/', verbose_name=_("Image"))
+    sort_order = models.PositiveSmallIntegerField(default=1, verbose_name=_("Ordre"))
+    uploaded_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date d'upload"))
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+        verbose_name = _("Image de colis")
+        verbose_name_plural = _("Images de colis")
+
+    def __str__(self):
+        return f"ParcelImage {self.id} - Parcel {self.parcel_id}"
+
+
 class Consolidation(models.Model):
     CONSOLIDATION_STATUS_CHOICES = [
         ('pending', _('En attente')),

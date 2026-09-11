@@ -15,6 +15,7 @@ from .views import (
     ShipmentBatchListCreateView,
     ShipmentBatchGenerateView,
     ShipmentBatchDetailView,
+    ConsolidationBulkStatusView,
 )
 
 urlpatterns = [
@@ -31,6 +32,7 @@ urlpatterns = [
     # URL pour le groupage de colis
     path('parcels/group/', ParcelGroupView.as_view(), name='parcel-group'),
     path('parcels/groups/', ConsolidationListView.as_view(), name='consolidation-list'),
+    path('parcels/groups/bulk-status/', ConsolidationBulkStatusView.as_view(), name='consolidation-bulk-status'),
     path('parcels/groups/<int:pk>/', ConsolidationDetailView.as_view(), name='consolidation-detail'),
 
     # Lots MCO

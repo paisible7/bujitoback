@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 import zipfile
 from django.core.files.base import ContentFile
 from rest_framework import generics, status, filters
@@ -23,6 +24,7 @@ from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from users.models import CustomUser
 from notifications.utils import notify_admins, send_fcm_notification
+from .pagination import OptionalPageNumberPagination
 
 class OrderListCreateView(generics.ListCreateAPIView):
     queryset = Order.objects.all()
@@ -159,6 +161,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         'description',
         'current_location',
     ]
+    pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
         if not self.request.user.is_authenticated:
@@ -166,6 +169,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         queryset = Parcel.objects.select_related('order__user').prefetch_related(
             'consolidations',
             'shipment_batches',
+            'extra_images',
         )
         if is_app_admin(self.request.user):
             return queryset
@@ -184,6 +188,7 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Parcel.objects.select_related('order__user').prefetch_related(
         'consolidations',
         'shipment_batches',
+        'extra_images',
     )
     lookup_field = 'tracking_number' # Important pour matcher l'URL
 
@@ -309,6 +314,7 @@ class ParcelGroupView(APIView):
 class ConsolidationListView(generics.ListAPIView):
     serializer_class = ConsolidationSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
         qs = Consolidation.objects.prefetch_related(
@@ -320,6 +326,52 @@ class ConsolidationListView(generics.ListAPIView):
         if self.request.user.is_authenticated and is_app_admin(self.request.user):
             return qs.all()
         return qs.filter(user=self.request.user)
+
+
+class ConsolidationBulkStatusView(APIView):
+    """Changer le statut de plusieurs groupages en une requête (admin)."""
+
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        ids = request.data.get('ids') or request.data.get('group_ids') or []
+        new_status = request.data.get('status')
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {"detail": "ids requis (liste non vide)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        valid = {c[0] for c in Consolidation.CONSOLIDATION_STATUS_CHOICES}
+        if new_status not in valid:
+            return Response(
+                {"detail": f"Statut invalide. Valeurs: {sorted(valid)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updated = []
+        missing = []
+        with transaction.atomic():
+            for raw_id in ids:
+                try:
+                    pk = int(raw_id)
+                except (TypeError, ValueError):
+                    missing.append(raw_id)
+                    continue
+                group = Consolidation.objects.filter(pk=pk).first()
+                if group is None:
+                    missing.append(pk)
+                    continue
+                group.status = new_status
+                group.save(update_fields=['status'])
+                updated.append(pk)
+
+        return Response({
+            "updated": updated,
+            "updated_count": len(updated),
+            "missing": missing,
+            "status": new_status,
+        }, status=status.HTTP_200_OK)
+
 
 class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = ConsolidationSerializer
@@ -569,12 +621,75 @@ class ImportBatchListView(APIView):
         return Response({"results": results, "date": date_str or None}, status=status.HTTP_200_OK)
 
 class ParcelImagesZipImportView(APIView):
-    """Importe un ZIP d'images et les associe aux colis par nom de fichier."""
+    """Importe un ZIP d'images et les associe aux colis par nom de fichier.
+
+    Convention :
+    - TRACK.jpg / TRACK_1.jpg → photo principale
+    - TRACK_2.jpg, TRACK_3.jpg → photos supplémentaires
+    Variantes : TRACK-2.jpg, TRACK (2).jpg
+    """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+    _SUFFIX_RE = re.compile(
+        r'^(?P<base>.+?)(?:[_\-\s]+(?P<n>\d+)| \((?P<n2>\d+)\))$'
+    )
+
+    def _parse_stem(self, stem: str):
+        raw = (stem or '').strip()
+        if not raw:
+            return '', 0
+        match = self._SUFFIX_RE.match(raw)
+        if not match:
+            return raw, 0
+        base = (match.group('base') or '').strip()
+        n = match.group('n') or match.group('n2') or '0'
+        try:
+            index = int(n)
+        except ValueError:
+            index = 0
+        # TRACK_1 = principale (comme TRACK sans suffixe)
+        if index <= 1:
+            return base or raw, 0
+        return base or raw, index
+
+    def _find_parcel(self, stem: str, basename: str):
+        stem_clean = (stem or '').strip()
+        base_clean = (basename or '').strip()
+        candidates = [stem_clean, base_clean]
+        for value in list(candidates):
+            if not value:
+                continue
+            candidates.append(value.replace(' ', ''))
+            candidates.append(value.replace('_', ''))
+            candidates.append(value.replace('-', ''))
+
+        seen = set()
+        for key in candidates:
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            parcel = (
+                Parcel.objects.filter(tracking_number__iexact=key).first()
+                or Parcel.objects.filter(supplier_tracking_number__iexact=key).first()
+            )
+            if parcel is not None:
+                return parcel
+
+        if stem_clean:
+            parcel = (
+                Parcel.objects.filter(tracking_number__icontains=stem_clean).first()
+                or Parcel.objects.filter(
+                    supplier_tracking_number__icontains=stem_clean
+                ).first()
+            )
+            if parcel is not None:
+                return parcel
+        return None
 
     def post(self, request):
+        from .models import ParcelImage
+
         zip_file = request.FILES.get('file')
         if not zip_file:
             return Response(
@@ -594,6 +709,7 @@ class ParcelImagesZipImportView(APIView):
 
         try:
             with zipfile.ZipFile(zip_file) as archive:
+                entries = []
                 for entry in archive.namelist():
                     if entry.endswith('/') or entry.startswith('__MACOSX/'):
                         continue
@@ -609,19 +725,34 @@ class ParcelImagesZipImportView(APIView):
                         continue
 
                     stem = os.path.splitext(basename)[0]
-                    parcel = (
-                        Parcel.objects.filter(tracking_number=stem).first()
-                        or Parcel.objects.filter(tracking_number=basename).first()
-                        or Parcel.objects.filter(description__icontains=basename).first()
-                    )
+                    base_key, sort_order = self._parse_stem(stem)
+                    entries.append((entry, basename, base_key, sort_order))
 
+                entries.sort(key=lambda item: (item[2].lower(), item[3], item[1]))
+
+                for entry, basename, base_key, sort_order in entries:
+                    parcel = self._find_parcel(base_key, basename)
                     if parcel is None:
                         errors.append(f"Aucun colis trouvé pour l'image {basename}")
                         continue
 
                     try:
                         content = archive.read(entry)
-                        parcel.image.save(basename, ContentFile(content), save=True)
+                        file_content = ContentFile(content, name=basename)
+                        if sort_order <= 0:
+                            parcel.image.save(basename, file_content, save=True)
+                        else:
+                            existing = parcel.extra_images.filter(
+                                sort_order=sort_order
+                            ).first()
+                            if existing:
+                                existing.image.save(basename, file_content, save=True)
+                            else:
+                                ParcelImage.objects.create(
+                                    parcel=parcel,
+                                    image=file_content,
+                                    sort_order=sort_order,
+                                )
                         matched += 1
                     except Exception as exc:
                         errors.append(f"Erreur pour {basename}: {exc}")
@@ -639,7 +770,6 @@ class ParcelImagesZipImportView(APIView):
             failed_count=len(errors),
             message=f"{matched} image(s) associée(s) aux colis.",
         )
-        # Ré-enregistrer une copie du ZIP (le pointeur fichier peut être au milieu)
         try:
             zip_file.seek(0)
             batch.file.save(zip_file.name, zip_file, save=True)

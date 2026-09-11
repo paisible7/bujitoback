@@ -14,6 +14,7 @@ from .quote_utils import (
 class ParcelSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     package_photo = serializers.SerializerMethodField()
+    package_photos = serializers.SerializerMethodField()
     user_email = serializers.SerializerMethodField()
     was_grouped = serializers.SerializerMethodField()
     group_id = serializers.SerializerMethodField()
@@ -26,7 +27,7 @@ class ParcelSerializer(serializers.ModelSerializer):
             'order_sequence', 'status', 'current_location',
             'client_name', 'client_phone', 'weight_volume', 'weight_kg',
             'warehouse_number', 'china_arrival_date', 'description',
-            'image', 'package_photo', 'last_updated', 'order',
+            'image', 'package_photo', 'package_photos', 'last_updated', 'order',
             'user_email', 'was_grouped', 'group_id', 'mco_code',
         ]
         read_only_fields = ('last_updated', 'mco_code')
@@ -46,22 +47,46 @@ class ParcelSerializer(serializers.ModelSerializer):
         return batches[0].code
 
     def get_image(self, obj):
-        return self._absolute_image_url(obj)
+        urls = self._all_image_urls(obj)
+        return urls[0] if urls else None
 
     def get_package_photo(self, obj):
-        return self._absolute_image_url(obj)
+        urls = self._all_image_urls(obj)
+        return urls[0] if urls else None
+
+    def get_package_photos(self, obj):
+        return self._all_image_urls(obj)
 
     def get_user_email(self, obj):
         if obj.order_id and obj.order:
             return obj.order.user.email
         return None
 
-    def _absolute_image_url(self, obj):
-        return absolute_media_url(
+    def _all_image_urls(self, obj):
+        request = self.context.get('request')
+        urls = []
+        main = absolute_media_url(
             obj.image,
-            self.context.get('request'),
+            request,
             label=f'Parcel #{obj.pk} ({obj.tracking_number})',
         )
+        if main:
+            urls.append(main)
+        extras = getattr(obj, '_prefetched_objects_cache', {}).get('extra_images')
+        extra_qs = extras if extras is not None else obj.extra_images.all()
+        for extra in extra_qs:
+            url = absolute_media_url(
+                extra.image,
+                request,
+                label=f'ParcelImage #{extra.pk}',
+            )
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
+    def _absolute_image_url(self, obj):
+        urls = self._all_image_urls(obj)
+        return urls[0] if urls else None
 
 
 class ShipmentBatchSerializer(serializers.ModelSerializer):

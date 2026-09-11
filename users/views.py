@@ -14,6 +14,7 @@ from .serializers import (
     CustomTokenObtainPairSerializer,
     PasswordResetVerifySerializer,
     PasswordResetSerializer,
+    build_china_warehouse_address,
 )
 from .roles import (
     CLIENT_ROLES,
@@ -43,6 +44,12 @@ class RegisterView(APIView):
                 'role': normalize_role(user.role),
                 'full_name': user.full_name,
                 'phone_number': user.phone_number,
+                'city': getattr(user, 'city', '') or '',
+                'china_warehouse_address': build_china_warehouse_address(
+                    user.full_name,
+                    user.phone_number,
+                    getattr(user, 'city', '') or '',
+                ),
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
