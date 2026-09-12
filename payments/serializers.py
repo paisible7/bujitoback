@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from parcels.media_urls import absolute_media_url
 from .models import PaymentMethod, Payment, SavedPaymentMethod
 
 class SavedPaymentMethodSerializer(serializers.ModelSerializer):
@@ -17,6 +18,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     redirect_url = serializers.ReadOnlyField(source='payment_url')
     user_email = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
+    proof_image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
@@ -32,8 +34,9 @@ class PaymentSerializer(serializers.ModelSerializer):
             'redirect_url',
             'user_email',
             'client_name',
+            'proof_image_url',
         ]
-        read_only_fields = ['reference', 'status', 'created_at']
+        read_only_fields = ['reference', 'status', 'created_at', 'proof_image_url']
 
     def get_method(self, obj):
         # Flutter expects a string value like 'orange_money', not the FK id.
@@ -45,3 +48,10 @@ class PaymentSerializer(serializers.ModelSerializer):
     def get_client_name(self, obj):
         name = (getattr(obj.user, 'full_name', '') or '').strip()
         return name or getattr(obj.user, 'email', '')
+
+    def get_proof_image_url(self, obj):
+        return absolute_media_url(
+            obj.proof_image,
+            self.context.get('request'),
+            label=f'Payment #{obj.pk} proof',
+        )

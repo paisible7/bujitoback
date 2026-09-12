@@ -104,6 +104,18 @@ class BusinessSettings(models.Model):
         verbose_name=_("1 USD → FCFA (XOF)"),
     )
 
+    # --- Adresse entrepôt Chine (globale, affiché sur tous les profils clients) ---
+    china_warehouse_phone = models.CharField(
+        max_length=50,
+        default="18575740344",
+        verbose_name=_("Entrepôt Chine — téléphone"),
+    )
+    china_warehouse_street = models.CharField(
+        max_length=500,
+        default="佛山市南海区狮山镇塘头村一队新一巷3号bujito",
+        verbose_name=_("Entrepôt Chine — adresse"),
+    )
+
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -15,10 +16,20 @@ def _sort_key(path: Path):
     return (int(match.group(1)) if match else 10**9, path.name.lower())
 
 
+def _image_missing(ad: Advertisement) -> bool:
+    if not ad.image:
+        return True
+    try:
+        return not os.path.exists(ad.image.path)
+    except Exception:
+        return True
+
+
 class Command(BaseCommand):
     help = (
         'Importe les affiches depuis ads/seed_images/ vers media/ads/ '
-        'et crée les lignes Advertisement (écran home par défaut).'
+        'et crée les lignes Advertisement (écran home par défaut). '
+        'Répare aussi les lignes DB dont le fichier image manque sur disque.'
     )
 
     def add_arguments(self, parser):
@@ -58,10 +69,27 @@ class Command(BaseCommand):
         ] or ['home']
 
         created = 0
+        repaired = 0
         for index, path in enumerate(files):
             title = f'Affiche {index + 1}'
-            if Advertisement.objects.filter(title=title, sort_order=index).exists():
-                self.stdout.write(f'Déjà présent: {title}')
+            existing = Advertisement.objects.filter(
+                title=title, sort_order=index
+            ).first()
+
+            if existing is not None:
+                if not _image_missing(existing):
+                    self.stdout.write(f'Déjà présent: {title}')
+                    continue
+                # Ligne DB sans fichier : ré-attache l'image seed.
+                with path.open('rb') as fh:
+                    existing.image.save(path.name, File(fh), save=True)
+                existing.is_active = True
+                existing.screens = screens
+                existing.save(update_fields=['is_active', 'screens', 'updated_at'])
+                repaired += 1
+                self.stdout.write(
+                    self.style.WARNING(f'Réparée (fichier manquant): {title} <- {path.name}')
+                )
                 continue
 
             ad = Advertisement(
@@ -77,6 +105,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f'Terminé: {created} créée(s), total={Advertisement.objects.count()}'
+                f'Terminé: {created} créée(s), {repaired} réparée(s), '
+                f'total={Advertisement.objects.count()}'
             )
         )

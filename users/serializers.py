@@ -12,9 +12,22 @@ from .roles import (
 
 User = get_user_model()
 
-# Adresse entrepôt Chine (fixe) pour les clients
+# Valeurs par défaut (si BusinessSettings absent / non migré)
 WAREHOUSE_PHONE = '18575740344'
 WAREHOUSE_STREET = '佛山市南海区狮山镇塘头村一队新一巷3号bujito'
+
+
+def _warehouse_parts():
+    """Téléphone + rue globaux (modifiables admin via BusinessSettings)."""
+    try:
+        from pricing.models import BusinessSettings
+
+        settings = BusinessSettings.load()
+        phone = (settings.china_warehouse_phone or '').strip() or WAREHOUSE_PHONE
+        street = (settings.china_warehouse_street or '').strip() or WAREHOUSE_STREET
+        return phone, street
+    except Exception:
+        return WAREHOUSE_PHONE, WAREHOUSE_STREET
 
 
 def build_china_warehouse_address(full_name: str, phone_number, city: str) -> str:
@@ -24,7 +37,8 @@ def build_china_warehouse_address(full_name: str, phone_number, city: str) -> st
     ville = (city or '').strip()
     paren_parts = [p for p in (name, phone, ville) if p]
     paren = ' '.join(paren_parts)
-    return f'BU.{name} {WAREHOUSE_PHONE} {WAREHOUSE_STREET} ( {paren} )'
+    warehouse_phone, warehouse_street = _warehouse_parts()
+    return f'BU.{name} {warehouse_phone} {warehouse_street} ( {paren} )'
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -33,6 +47,10 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = (
+            'id', 'email', 'role', 'full_name', 'phone_number', 'city',
+            'is_active', 'stars', 'china_warehouse_address',
+        )
+        read_only_fields = (
             'id', 'email', 'role', 'full_name', 'phone_number', 'city',
             'is_active', 'china_warehouse_address',
         )
@@ -43,6 +61,26 @@ class UserSerializer(serializers.ModelSerializer):
             obj.phone_number,
             getattr(obj, 'city', '') or '',
         )
+
+
+class AdminUserUpdateSerializer(serializers.ModelSerializer):
+    """Admin : attribution d'étoiles (1–5) aux clients."""
+
+    stars = serializers.IntegerField(min_value=0, max_value=5)
+
+    class Meta:
+        model = User
+        fields = ('stars',)
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is not None:
+            role = normalize_role(instance.role)
+            if role not in (ROLE_CLIENT, 'user'):
+                raise serializers.ValidationError(
+                    "Les étoiles ne s'appliquent qu'aux clients."
+                )
+        return attrs
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -177,6 +215,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'full_name': user.full_name,
             'phone_number': user.phone_number,
             'city': getattr(user, 'city', '') or '',
+            'stars': getattr(user, 'stars', 0) or 0,
             'china_warehouse_address': build_china_warehouse_address(
                 user.full_name,
                 user.phone_number,

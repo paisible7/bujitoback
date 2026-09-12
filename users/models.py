@@ -1,4 +1,5 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -45,6 +46,12 @@ class CustomUser(AbstractUser):
         max_length=5,
         choices=[('fr', 'Français'), ('en', 'English')],
         default='fr',
+    )
+    stars = models.PositiveSmallIntegerField(
+        default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(5)],
+        verbose_name=_('Étoiles client (0–5)'),
+        help_text=_('Notation admin : 0 = non noté, 1 à 5 = niveau client.'),
     )
 
     objects = CustomUserManager()

@@ -9,7 +9,12 @@ from rest_framework.views import APIView
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from .models import AD_SCREEN_KEYS, Advertisement
-from .serializers import AdvertisementSerializer, parse_screens, parse_optional_datetime
+from .serializers import (
+    AdvertisementSerializer,
+    parse_screens,
+    parse_optional_datetime,
+    _as_plain_dict,
+)
 
 
 class AdvertisementListView(generics.ListAPIView):
@@ -44,9 +49,13 @@ class AdvertisementCreateView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
-        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        data = _as_plain_dict(request.data)
+        if request.FILES.get('image'):
+            data['image'] = request.FILES.get('image')
         if 'is_active' in data and isinstance(data.get('is_active'), str):
-            data['is_active'] = data.get('is_active').lower() in ('1', 'true', 'yes', 'on')
+            data['is_active'] = data.get('is_active').lower() in (
+                '1', 'true', 'yes', 'on',
+            )
         if 'screens' in data:
             data['screens'] = parse_screens(data.get('screens'))
         if 'starts_at' in data:
@@ -58,7 +67,7 @@ class AdvertisementCreateView(APIView):
             context={'request': request},
         )
         serializer.is_valid(raise_exception=True)
-        if not request.FILES.get('image') and not data.get('image'):
+        if not data.get('image'):
             return Response(
                 {'image': 'Image obligatoire.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -81,9 +90,13 @@ class AdvertisementDetailView(APIView):
         ad = self.get_object(pk)
         if ad is None:
             return Response({'detail': 'Introuvable.'}, status=status.HTTP_404_NOT_FOUND)
-        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        data = _as_plain_dict(request.data)
+        if request.FILES.get('image'):
+            data['image'] = request.FILES.get('image')
         if 'is_active' in data and isinstance(data.get('is_active'), str):
-            data['is_active'] = data.get('is_active').lower() in ('1', 'true', 'yes', 'on')
+            data['is_active'] = data.get('is_active').lower() in (
+                '1', 'true', 'yes', 'on',
+            )
         if 'screens' in data:
             data['screens'] = parse_screens(data.get('screens'))
         if 'starts_at' in data:

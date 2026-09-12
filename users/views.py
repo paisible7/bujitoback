@@ -11,6 +11,7 @@ from .serializers import (
     RegisterSerializer,
     UserSerializer,
     AdminCreateUserSerializer,
+    AdminUserUpdateSerializer,
     CustomTokenObtainPairSerializer,
     PasswordResetVerifySerializer,
     PasswordResetSerializer,
@@ -45,6 +46,7 @@ class RegisterView(APIView):
                 'full_name': user.full_name,
                 'phone_number': user.phone_number,
                 'city': getattr(user, 'city', '') or '',
+                'stars': getattr(user, 'stars', 0) or 0,
                 'china_warehouse_address': build_china_warehouse_address(
                     user.full_name,
                     user.phone_number,
@@ -133,6 +135,35 @@ class UserListCreateView(generics.ListCreateAPIView):
             UserSerializer(user).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class UserAdminDetailView(generics.RetrieveUpdateAPIView):
+    """Admin : détail / mise à jour (étoiles) d'un utilisateur."""
+
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        actor = self.request.user
+        if is_platform_superuser(actor):
+            return User.objects.filter(
+                role__in=[ROLE_CLIENT, ROLE_ADMIN, 'user'],
+            )
+        return User.objects.filter(role__in=CLIENT_ROLES)
+
+    def get_serializer_class(self):
+        if self.request.method == 'PATCH':
+            return AdminUserUpdateSerializer
+        return UserSerializer
+
+    def patch(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = AdminUserUpdateSerializer(
+            instance, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UserSerializer(instance).data)
 
 
 class PasswordResetVerifyView(APIView):

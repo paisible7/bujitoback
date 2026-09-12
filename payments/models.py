@@ -71,6 +71,12 @@ class Payment(models.Model):
     payment_url = models.URLField(max_length=500, blank=True, null=True, verbose_name=_("URL de paiement"))
     phone_number = models.CharField(max_length=50, blank=True, null=True, verbose_name=_("Téléphone"))
     provider_raw_response = models.JSONField(blank=True, null=True, verbose_name=_("Réponse brute du fournisseur"))
+    proof_image = models.ImageField(
+        upload_to='payments/proofs/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_("Preuve (capture)"),
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date de création"))
     updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Dernière mise à jour"))
 

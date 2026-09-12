@@ -243,6 +243,44 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
         return
 
     user = instance.user
+
+    if getattr(instance, "_client_edited", False):
+        parcel_count = instance.parcels.count()
+        note = (instance.client_note or "").strip()
+        admin_body = (
+            f"{user.email} a modifié le groupage #{instance.pk} "
+            f"({parcel_count} colis). Un nouveau devis poids/frais est requis."
+        )
+        if note:
+            admin_body = f"{admin_body} Description: {note}"
+        notify_admins(
+            "Groupage modifié",
+            admin_body,
+            type="consolidation",
+            reference_id=instance.pk,
+            data={
+                "type": "consolidation",
+                "reference_id": instance.pk,
+                "action": "quote",
+            },
+        )
+        send_fcm_notification(
+            user,
+            "Groupage mis a jour",
+            (
+                f"Votre groupage #{instance.pk} a ete mis a jour. "
+                "Un nouveau devis poids/frais vous sera propose."
+            ),
+            type="consolidation",
+            reference_id=instance.pk,
+            data={
+                "type": "consolidation",
+                "reference_id": instance.pk,
+                "action": "edited",
+            },
+        )
+        return
+
     old_status = getattr(instance, "_old_status", None)
     if old_status == instance.status:
         return

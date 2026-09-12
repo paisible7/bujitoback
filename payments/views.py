@@ -6,6 +6,7 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
+from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
 from rest_framework.response import Response
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -177,9 +178,13 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Payment.objects.all()
     serializer_class = PaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get_queryset(self):
         return self.queryset.filter(user=self.request.user)
+
+    def _serialize_payment(self, payment, request):
+        return PaymentSerializer(payment, context={'request': request}).data
 
     @action(detail=False, methods=["post"])
     def initiate(self, request):
@@ -189,6 +194,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         saved_method_id = request.data.get("saved_method_id")
         transfer_type = (request.data.get("type") or "").strip().lower()
         is_transfer = transfer_type == "money_transfer"
+        proof_image = request.FILES.get("proof_image") if is_transfer else None
 
         if not method_code:
             return Response({"message": "method is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -314,6 +320,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     status="pending",
                     phone_number=phone_number or None,
                     provider_raw_response=meta,
+                    proof_image=proof_image,
                 )
 
         ussd_code = None
@@ -368,7 +375,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             message = "Transfert initié" if is_transfer else "Paiement initialisé"
 
         payment.refresh_from_db()
-        tx = PaymentSerializer(payment).data
+        tx = self._serialize_payment(payment, request)
         return Response(
             {
                 "transaction": tx,
@@ -392,7 +399,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(
             {
-                "transaction": PaymentSerializer(payment).data,
+                "transaction": self._serialize_payment(payment, request),
                 "message": f"Statut du paiement : {payment.get_status_display()}",
             },
             status=status.HTTP_200_OK,
@@ -401,7 +408,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"])
     def history(self, request):
         payments = self.get_queryset().order_by("-created_at")
-        serializer = PaymentSerializer(payments, many=True)
+        serializer = PaymentSerializer(
+            payments, many=True, context={'request': request}
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"])
@@ -415,7 +424,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             Payment.objects.select_related("user", "order", "method")
             .order_by("-created_at")
         )
-        serializer = PaymentSerializer(payments, many=True)
+        serializer = PaymentSerializer(
+            payments, many=True, context={'request': request}
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["post"], permission_classes=[permissions.AllowAny])

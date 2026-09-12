@@ -562,6 +562,172 @@ class ConsolidationCreateSerializer(serializers.Serializer):
         return (value or '').strip()
 
 
+class ConsolidationClientUpdateSerializer(serializers.Serializer):
+    """Client : modifier colis / note → invalide le devis (poids + frais)."""
+
+    tracking_numbers = serializers.ListField(
+        child=serializers.CharField(max_length=100),
+        min_length=2,
+        required=False,
+    )
+    client_note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=2000,
+    )
+
+    def validate_tracking_numbers(self, value):
+        if len(value) > 500:
+            raise serializers.ValidationError(
+                "Vous ne pouvez pas grouper plus de 500 colis à la fois."
+            )
+        # Dédupliquer en conservant l'ordre
+        seen = set()
+        cleaned = []
+        for tn in value:
+            key = str(tn).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(key)
+        if len(cleaned) < 2:
+            raise serializers.ValidationError(
+                "Sélectionnez au moins 2 colis pour le groupage."
+            )
+        return cleaned
+
+    def validate_client_note(self, value):
+        return (value or '').strip()
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is None:
+            return attrs
+        if instance.status == 'cancelled':
+            raise serializers.ValidationError(
+                "Une demande de groupage annulée ne peut pas être modifiée."
+            )
+        if 'tracking_numbers' not in attrs and 'client_note' not in attrs:
+            raise serializers.ValidationError(
+                "Indiquez les colis et/ou une description à mettre à jour."
+            )
+        return attrs
+
+    def _resolve_parcels(self, tracking_numbers, user, consolidation):
+        from .models import Parcel, Consolidation
+
+        parcels = []
+        current_ids = set(consolidation.parcels.values_list('id', flat=True))
+        for tn in tracking_numbers:
+            try:
+                parcel = Parcel.objects.select_related('order').get(
+                    tracking_number=tn
+                )
+            except Parcel.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"tracking_numbers": f"Le colis {tn} n'existe pas."}
+                )
+            if not parcel.order or parcel.order.user_id != user.id:
+                raise serializers.ValidationError(
+                    {
+                        "tracking_numbers": (
+                            f"Le colis {tn} n'appartient pas à l'utilisateur."
+                        )
+                    }
+                )
+            in_this = parcel.id in current_ids
+            status_ok = parcel.status == 'pending' or (
+                parcel.status == 'consolidated' and in_this
+            )
+            if not status_ok:
+                raise serializers.ValidationError(
+                    {
+                        "tracking_numbers": (
+                            f"Le colis {tn} n'est pas éligible au groupage."
+                        )
+                    }
+                )
+            other = Consolidation.objects.filter(
+                status__in=['pending', 'processing'],
+                parcels=parcel,
+            ).exclude(pk=consolidation.pk).exists()
+            if other:
+                raise serializers.ValidationError(
+                    {
+                        "tracking_numbers": (
+                            f"Le colis {tn} fait déjà partie d'une autre "
+                            "demande de groupage en cours."
+                        )
+                    }
+                )
+            parcels.append(parcel)
+        return parcels
+
+    def update(self, instance, validated_data):
+        from django.db import transaction
+
+        from .models import Consolidation, ConsolidationParcelDecision
+
+        request = self.context.get('request')
+        user = request.user if request is not None else instance.user
+        tracking_numbers = validated_data.get('tracking_numbers', serializers.empty)
+        has_note = 'client_note' in validated_data
+        client_note = validated_data.get('client_note') if has_note else None
+
+        with transaction.atomic():
+            old_parcels = list(instance.parcels.all())
+            was_completed = instance.status == 'completed'
+
+            if tracking_numbers is not serializers.empty:
+                new_parcels = self._resolve_parcels(
+                    tracking_numbers, user, instance
+                )
+                instance.parcels.set(new_parcels)
+            else:
+                new_parcels = list(instance.parcels.all())
+
+            if has_note:
+                instance.client_note = client_note or ''
+
+            # Invalider le devis poids / frais
+            instance.weight_kg = None
+            instance.billable_weight_kg = None
+            instance.grouping_fee = None
+            ConsolidationParcelDecision.objects.filter(
+                consolidation=instance
+            ).delete()
+
+            # Après confirmation (ou en cours) → rouvre en attente
+            if instance.status in ('completed', 'processing'):
+                instance.status = 'pending'
+
+            # Remettre les colis consolidés de ce groupage en « pending »
+            affected = {p.id: p for p in old_parcels}
+            for p in new_parcels:
+                affected[p.id] = p
+            for parcel in affected.values():
+                if parcel.status != 'consolidated':
+                    continue
+                still_elsewhere = Consolidation.objects.filter(
+                    status='completed',
+                    parcels=parcel,
+                ).exclude(pk=instance.pk).exists()
+                if still_elsewhere:
+                    continue
+                parcel.status = 'pending'
+                parcel.save(update_fields=['status', 'last_updated'])
+
+            instance._client_edited = True
+            instance.save()
+
+            # Si on rouvre un groupage déjà terminé, le changement de
+            # statut doit être visible même si seuls les frais changent.
+            if was_completed and instance.status == 'pending':
+                pass
+
+        return instance
+
+
 class ConsolidationUpdateSerializer(serializers.ModelSerializer):
     parcel_id = serializers.IntegerField(required=False)
     decision = serializers.ChoiceField(

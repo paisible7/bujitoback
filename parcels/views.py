@@ -18,6 +18,7 @@ from .serializers import (
     OrderQuoteSerializer,
     ConsolidationSerializer,
     ConsolidationCreateSerializer,
+    ConsolidationClientUpdateSerializer,
     ConsolidationUpdateSerializer,
     ShipmentBatchSerializer,
 )
@@ -473,18 +474,53 @@ class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
 
     def get_serializer_class(self):
         if self.request.method in ('PUT', 'PATCH'):
+            if not is_app_admin(self.request.user):
+                return ConsolidationClientUpdateSerializer
             return ConsolidationUpdateSerializer
         return ConsolidationSerializer
 
     def get_object(self):
         obj = super().get_object()
-        if self.request.method == 'GET':
-            if obj.user != self.request.user and (not is_app_admin(self.request.user)):
+        user = self.request.user
+        is_owner = obj.user_id == user.id
+        admin = is_app_admin(user)
+
+        if self.request.method in ('GET', 'HEAD', 'OPTIONS'):
+            if not is_owner and not admin:
                 self.permission_denied(self.request)
             return obj
-        if (not is_app_admin(self.request.user)):
-            self.permission_denied(self.request)
+
+        if admin:
+            return obj
+        # Client propriétaire : peut modifier tant que non annulé
+        # (avant confirmation, après devis, ou après acceptation).
+        if is_owner and obj.status != 'cancelled':
+            return obj
+        self.permission_denied(self.request)
         return obj
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer_class = self.get_serializer_class()
+
+        if serializer_class is ConsolidationClientUpdateSerializer:
+            serializer = ConsolidationClientUpdateSerializer(
+                instance,
+                data=request.data,
+                partial=partial,
+                context={'request': request},
+            )
+            serializer.is_valid(raise_exception=True)
+            group = serializer.save()
+            group.refresh_from_db()
+            return Response(
+                ConsolidationSerializer(
+                    group, context={'request': request}
+                ).data
+            )
+
+        return super().update(request, *args, **kwargs)
 
 class ParcelBulkImportView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
