@@ -13,8 +13,11 @@ from .roles import (
 User = get_user_model()
 
 # Valeurs par défaut (si BusinessSettings absent / non migré)
-WAREHOUSE_PHONE = '18575740344'
-WAREHOUSE_STREET = '佛山市南海区狮山镇塘头村一队新一巷3号bujito'
+WAREHOUSE_PHONE = '18364649039'
+WAREHOUSE_STREET = (
+    '浙江省台州市椒江区 浙江省台州市椒江区 '
+    '市府大道1139号台州学院椒江校区台州学院椒江校区国际会议厅bujito'
+)
 
 
 def _warehouse_parts():

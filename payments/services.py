@@ -19,7 +19,7 @@ class PaymentService:
         # payload = {
         #     "item_name": f"Commande {payment.reference}",
         #     "amount": str(payment.amount),
-        #     "currency": "XOF",
+        #     "currency": "FCFA",
         #     "external_id": payment.reference,
         #     "success_url": "http://votre-app.com/success",
         #     "cancel_url": "http://votre-app.com/cancel",

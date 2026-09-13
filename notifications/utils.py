@@ -25,6 +25,7 @@ def send_fcm_notification(
     image_bytes=None,
     image_name=None,
     request=None,
+    translate=True,
 ):
     """Envoie une notification à tous les appareils enregistrés d'un utilisateur."""
     # L'initialisation est maintenant gérée par NotificationsConfig.ready() dans apps.py
@@ -34,9 +35,13 @@ def send_fcm_notification(
     with translation.override(user_language):
         from .models import FCMDevice, Notification
 
-        # On s'assure que les textes sont traduits
-        translated_title = strip_emojis(_(title))
-        translated_body = strip_emojis(_(body))
+        # Textes libres (admin) : ne pas passer par gettext
+        if translate:
+            translated_title = strip_emojis(_(title))
+            translated_body = strip_emojis(_(body))
+        else:
+            translated_title = strip_emojis(title)
+            translated_body = strip_emojis(body)
 
         # 1. Sauvegarder dans l'historique
         notif = Notification.objects.create(
@@ -50,8 +55,9 @@ def send_fcm_notification(
         if image is not None:
             notif.image = image
             notif.save(update_fields=['image'])
-        elif image_bytes is not None and image_name:
-            notif.image.save(image_name, ContentFile(image_bytes), save=True)
+        elif image_bytes:
+            name = image_name or 'annonce.jpg'
+            notif.image.save(name, ContentFile(image_bytes), save=True)
 
         image_url = None
         if notif.image:
@@ -117,10 +123,14 @@ def send_fcm_notification(
 
 
 def notify_admins(title, body, *, type="info", reference_id=None, data=None):
-    """Envoie une notification à tous les administrateurs."""
+    """Envoie une notification à tous les administrateurs (admin + superuser)."""
+    from django.db.models import Q
     from users.models import CustomUser
+    from users.roles import APP_ADMIN_ROLES
 
-    admins = CustomUser.objects.filter(role='admin', is_active=True)
+    admins = CustomUser.objects.filter(is_active=True).filter(
+        Q(role__in=APP_ADMIN_ROLES) | Q(is_superuser=True)
+    ).distinct()
     results = []
     for admin in admins:
         results.append(
@@ -131,6 +141,7 @@ def notify_admins(title, body, *, type="info", reference_id=None, data=None):
                 data=data,
                 type=type,
                 reference_id=reference_id,
+                translate=False,
             )
         )
     return results

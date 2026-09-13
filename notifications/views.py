@@ -8,6 +8,26 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
+
+def _as_plain_dict(data):
+    """Normalise QueryDict / multipart en dict Python simple."""
+    if data is None:
+        return {}
+    if hasattr(data, 'lists'):
+        out = {}
+        for key, values in data.lists():
+            if not values:
+                continue
+            out[key] = values[0] if len(values) == 1 else list(values)
+        return out
+    if hasattr(data, 'copy'):
+        try:
+            return dict(data.copy())
+        except Exception:
+            pass
+    return dict(data) if not isinstance(data, dict) else dict(data)
+
+
 class NotificationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = NotificationSerializer
@@ -55,68 +75,100 @@ class NotificationViewSet(viewsets.ModelViewSet):
         from users.roles import CLIENT_ROLES, is_app_admin
 
         if not is_app_admin(request.user):
-            return Response({"detail": "Action réservée aux administrateurs."}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"detail": "Action réservée aux administrateurs."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        payload = _as_plain_dict(request.data)
 
         # Multipart: send_to_all arrive souvent en string "true"/"false"
-        mutable = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
-        if 'send_to_all' in mutable:
-            val = mutable.get('send_to_all')
+        if 'send_to_all' in payload:
+            val = payload.get('send_to_all')
             if isinstance(val, str):
-                mutable['send_to_all'] = val.lower() in ('1', 'true', 'yes', 'on')
+                payload['send_to_all'] = val.lower() in ('1', 'true', 'yes', 'on')
 
         # Multipart: user_ids peut arriver en JSON string
-        if 'user_ids' in mutable:
+        if 'user_ids' in payload:
             import json
-            raw_ids = mutable.get('user_ids')
+            raw_ids = payload.get('user_ids')
             if isinstance(raw_ids, str):
                 try:
-                    mutable['user_ids'] = json.loads(raw_ids)
+                    payload['user_ids'] = json.loads(raw_ids)
                 except json.JSONDecodeError:
-                    # Forme "1,2,3"
-                    mutable['user_ids'] = [
+                    payload['user_ids'] = [
                         int(x.strip()) for x in raw_ids.split(',') if x.strip().isdigit()
                     ]
 
-        serializer = AdminSendNotificationSerializer(data=mutable)
+        # Image : lire une seule fois depuis FILES (évite double-read vide)
+        image_bytes = None
+        image_name = None
+        image_file = request.FILES.get('image')
+        if image_file is not None:
+            try:
+                if hasattr(image_file, 'seek'):
+                    image_file.seek(0)
+                image_bytes = image_file.read()
+                image_name = getattr(image_file, 'name', 'annonce.jpg') or 'annonce.jpg'
+            except Exception:
+                image_bytes = None
+                image_name = None
+            # Ne pas revalider le fichier déjà consommé via ImageField
+            payload.pop('image', None)
+
+        serializer = AdminSendNotificationSerializer(data=payload)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
         if data.get('send_to_all'):
-            recipients = User.objects.filter(role__in=CLIENT_ROLES, is_active=True)
+            recipients = list(
+                User.objects.filter(role__in=CLIENT_ROLES, is_active=True)
+            )
         else:
-            recipients = User.objects.filter(pk__in=data.get('user_ids') or [])
+            recipients = list(
+                User.objects.filter(pk__in=data.get('user_ids') or [], is_active=True)
+            )
 
-        image_file = data.get('image') or request.FILES.get('image')
-        image_bytes = None
-        image_name = None
-        if image_file is not None:
-            image_bytes = image_file.read()
-            image_name = getattr(image_file, 'name', 'annonce.jpg')
+        if not recipients:
+            return Response(
+                {
+                    "sent_count": 0,
+                    "push_count": 0,
+                    "failed": [],
+                    "total_recipients": 0,
+                    "message": "Aucun destinataire trouvé.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         sent_count = 0
         push_count = 0
         failed = []
         for user in recipients:
-            result = send_fcm_notification(
-                user,
-                data['title'],
-                data['message'],
-                type=data.get('type', 'general'),
-                data={'type': data.get('type', 'general')},
-                image_bytes=image_bytes,
-                image_name=image_name,
-                request=request,
-            )
-            sent_count += 1
-            if result.get('success'):
-                push_count += 1
-            else:
+            try:
+                result = send_fcm_notification(
+                    user,
+                    data['title'],
+                    data['message'],
+                    type=data.get('type', 'general'),
+                    data={'type': data.get('type', 'general')},
+                    image_bytes=image_bytes if image_bytes else None,
+                    image_name=image_name,
+                    request=request,
+                    translate=False,
+                )
+                sent_count += 1
+                if result.get('success'):
+                    push_count += 1
+                else:
+                    failed.append(user.pk)
+            except Exception:
                 failed.append(user.pk)
 
         return Response({
             "sent_count": sent_count,
             "push_count": push_count,
             "failed": failed,
-            "total_recipients": recipients.count() if hasattr(recipients, 'count') else len(list(recipients)),
+            "total_recipients": len(recipients),
             "message": f"Notification envoyée à {sent_count} client(s).",
         }, status=status.HTTP_200_OK)

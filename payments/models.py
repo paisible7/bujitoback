@@ -63,7 +63,7 @@ class Payment(models.Model):
         verbose_name=_("Commande"),
     )
     amount = models.DecimalField(max_digits=10, decimal_places=2, verbose_name=_("Montant"))
-    currency = models.CharField(max_length=10, default='XOF', verbose_name=_("Devise"))
+    currency = models.CharField(max_length=10, default='FCFA', verbose_name=_("Devise"))
     reference = models.CharField(max_length=100, unique=True, verbose_name=_("Référence"))
     external_id = models.CharField(max_length=255, blank=True, null=True, verbose_name=_("ID externe"))
     method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, verbose_name=_("Méthode"))

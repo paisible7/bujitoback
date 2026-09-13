@@ -162,6 +162,21 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
         elif uploads:
             order.images.all().delete()
 
+        # Remap package_index des images conservées (édition multi-colis)
+        remap_raw = request.data.get('keep_image_package_indexes', '')
+        if isinstance(remap_raw, str) and remap_raw.strip():
+            for part in remap_raw.split(','):
+                part = part.strip()
+                if not part or ':' not in part:
+                    continue
+                id_s, pkg_s = part.split(':', 1)
+                try:
+                    img_id = int(id_s.strip())
+                    pkg_i = max(0, int(pkg_s.strip()))
+                except ValueError:
+                    continue
+                order.images.filter(id=img_id).update(package_index=pkg_i)
+
         indexes_raw = request.data.get('image_package_indexes', '')
         index_list = []
         if isinstance(indexes_raw, str) and indexes_raw.strip():

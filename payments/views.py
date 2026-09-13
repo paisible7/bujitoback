@@ -41,6 +41,26 @@ DEFAULT_METHOD_NAMES = {
 MOBILE_MONEY_CODES = {"orange_money", "mtn_momo", "wave", "moov"}
 
 
+def _format_payment_amount(amount, currency: str | None) -> str:
+    """Libellé montant pour notifications (USD / Fc / £ / FCFA — jamais XOF)."""
+    code = (currency or "USD").strip().upper()
+    if code == "XOF":
+        code = "FCFA"
+    if code == "FC":
+        code = "CDF"
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        value = 0.0
+    if code == "CDF":
+        return f"{value:,.0f} Fc".replace(",", " ")
+    if code == "GBP":
+        return f"£{value:,.2f}"
+    if code == "FCFA":
+        return f"{value:,.0f} FCFA".replace(",", " ")
+    return f"${value:,.2f}"
+
+
 def _ensure_checkout_payment_methods():
     """Crée / réactive Mobile Money, Wave et carte bancaire."""
     for code, name in CHECKOUT_METHOD_SPECS:
@@ -211,6 +231,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         amount = None
         meta = None
 
+        transfer_currency = "FCFA"
         if is_transfer:
             try:
                 amount = float(request.data.get("amount"))
@@ -218,6 +239,18 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({"message": "amount is required"}, status=status.HTTP_400_BAD_REQUEST)
             if amount <= 0:
                 return Response({"message": "amount must be positive"}, status=status.HTTP_400_BAD_REQUEST)
+
+            raw_currency = (request.data.get("currency") or "FCFA").strip().upper()
+            if raw_currency == "XOF":
+                raw_currency = "FCFA"
+            if raw_currency == "FC":
+                raw_currency = "CDF"
+            if raw_currency not in {"USD", "FCFA", "CDF", "GBP"}:
+                return Response(
+                    {"message": "currency must be USD, FCFA, CDF or GBP"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            transfer_currency = raw_currency
 
             beneficiary_name = (request.data.get("beneficiary_name") or "").strip()
             beneficiary_phone = (request.data.get("beneficiary_phone") or "").strip()
@@ -235,6 +268,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 "beneficiary_name": beneficiary_name,
                 "beneficiary_phone": beneficiary_phone,
                 "note": note,
+                "currency": transfer_currency,
             }
         else:
             if not order_id:
@@ -302,7 +336,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                         user=request.user,
                         order=order,
                         amount=amount,
-                        currency="XOF" if is_transfer else "USD",
+                        currency=transfer_currency if is_transfer else "USD",
                         method=method,
                         reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
                         status="pending",
@@ -314,7 +348,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     user=request.user,
                     order=order,
                     amount=amount,
-                    currency="XOF" if is_transfer else "USD",
+                    currency=transfer_currency if is_transfer else "USD",
                     method=method,
                     reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
                     status="pending",
@@ -370,9 +404,41 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             )
             checkout_url = None
             message = "Composez le code USSD pour confirmer le paiement"
+        elif is_transfer:
+            # Transfert d'argent = service à part : reste en attente jusqu'à confirmation admin.
+            checkout_url = None
+            message = "Transfert initié — en attente de confirmation"
+            try:
+                from notifications.utils import notify_admins, send_fcm_notification
+
+                amount_label = _format_payment_amount(payment.amount, payment.currency)
+                beneficiary = (meta or {}).get("beneficiary_name") or "—"
+                notify_admins(
+                    "Nouveau transfert d'argent",
+                    f"{request.user.email} · {amount_label} → {beneficiary}. "
+                    f"Réf. {payment.reference}. À valider dans Gestion des paiements.",
+                    type="payment",
+                    reference_id=payment.pk,
+                    data={
+                        "type": "payment",
+                        "payment_id": str(payment.pk),
+                        "transfer": "1",
+                    },
+                )
+                send_fcm_notification(
+                    request.user,
+                    "Transfert initié",
+                    f"Votre transfert de {amount_label} est en attente de validation.",
+                    type="payment",
+                    reference_id=payment.pk,
+                    data={"type": "payment", "payment_id": str(payment.pk)},
+                    translate=False,
+                )
+            except Exception:
+                pass
         else:
             checkout_url = PaymentService.initiate_payment(payment)
-            message = "Transfert initié" if is_transfer else "Paiement initialisé"
+            message = "Paiement initialisé"
 
         payment.refresh_from_db()
         tx = self._serialize_payment(payment, request)
@@ -415,7 +481,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"])
     def manage(self, request):
-        if getattr(request.user, "role", None) != "admin":
+        from users.roles import is_app_admin
+
+        if not is_app_admin(request.user):
             return Response(
                 {"message": "Accès refusé"},
                 status=status.HTTP_403_FORBIDDEN,
@@ -428,6 +496,106 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             payments, many=True, context={'request': request}
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="set-status")
+    def set_status(self, request, pk=None):
+        """Admin : confirmer / rejeter un paiement ou transfert d'argent."""
+        from users.roles import is_app_admin
+        from notifications.utils import send_fcm_notification
+
+        if not is_app_admin(request.user):
+            return Response(
+                {"message": "Accès refusé"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        new_status = (request.data.get("status") or "").strip().lower()
+        if new_status not in {"completed", "failed", "cancelled"}:
+            return Response(
+                {"message": "status must be completed, failed or cancelled"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            payment = Payment.objects.select_related("user", "order", "method").get(
+                pk=pk
+            )
+        except Payment.DoesNotExist:
+            return Response(
+                {"message": "Paiement non trouvé"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if payment.status not in {"pending", "processing"}:
+            return Response(
+                {"message": "Ce paiement ne peut plus être modifié."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Paiement commande : contrôles métier uniquement à la confirmation
+        if (
+            new_status == "completed"
+            and payment.order_id is not None
+        ):
+            order = payment.order
+            if (
+                order is None
+                or not order.quote_ready
+                or order.total_amount <= 0
+                or payment.amount != order.total_amount
+            ):
+                return Response(
+                    {
+                        "message": (
+                            "Impossible de confirmer : devis invalide "
+                            "ou montant ne correspond pas."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        payment.status = new_status
+        payment.save(update_fields=["status", "updated_at"])
+
+        meta = payment.provider_raw_response if isinstance(
+            payment.provider_raw_response, dict
+        ) else {}
+        is_transfer = (
+            meta.get("type") == "money_transfer"
+            or (payment.order_id is None and (payment.reference or "").startswith("TRF"))
+        )
+
+        if is_transfer and payment.user_id:
+            amount_label = _format_payment_amount(payment.amount, payment.currency)
+            if new_status == "completed":
+                title = "Transfert confirmé"
+                body = f"Votre transfert de {amount_label} a été confirmé."
+            elif new_status == "failed":
+                title = "Transfert échoué"
+                body = f"Votre transfert de {amount_label} a été rejeté."
+            else:
+                title = "Transfert annulé"
+                body = f"Votre transfert de {amount_label} a été annulé."
+            try:
+                send_fcm_notification(
+                    payment.user,
+                    title,
+                    body,
+                    type="payment",
+                    reference_id=payment.pk,
+                    data={"type": "payment", "payment_id": str(payment.pk)},
+                    translate=False,
+                )
+            except Exception:
+                pass
+
+        return Response(
+            {
+                "transaction": self._serialize_payment(payment, request),
+                "message": f"Statut mis à jour : {payment.get_status_display()}",
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=["post"], permission_classes=[permissions.AllowAny])
     @method_decorator(csrf_exempt)

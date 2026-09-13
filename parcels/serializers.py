@@ -9,6 +9,8 @@ from .quote_utils import (
     compute_quote_total,
     total_items_quantity,
     flatten_packages,
+    ensure_item_package_indexes,
+    reconstruct_packages,
 )
 
 class ParcelSerializer(serializers.ModelSerializer):
@@ -128,6 +130,7 @@ class OrderSerializer(serializers.ModelSerializer):
     user_full_name = serializers.CharField(source='user.full_name', read_only=True)
     product_links_list = serializers.SerializerMethodField()
     product_items = serializers.SerializerMethodField()
+    packages = serializers.SerializerMethodField()
     payment_completed = serializers.SerializerMethodField()
 
     class Meta:
@@ -137,7 +140,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'total_amount', 'withdrawal_fee', 'commission_fee', 'quote_ready',
             'expected_parcel_count', 'payment_completed',
             'client_name', 'client_phone', 'country', 'city',
-            'product_links', 'product_links_list', 'product_items',
+            'product_links', 'product_links_list', 'product_items', 'packages',
             'quantity', 'comment',
             'parcels', 'images',
         )
@@ -150,7 +153,10 @@ class OrderSerializer(serializers.ModelSerializer):
         )
 
     def get_product_items(self, obj):
-        items = parse_product_items(obj.product_links)
+        items = ensure_item_package_indexes(
+            parse_product_items(obj.product_links),
+            expected_count=getattr(obj, 'expected_parcel_count', 1) or 1,
+        )
         result = []
         for item in items:
             price = item.get('price')
@@ -160,11 +166,28 @@ class OrderSerializer(serializers.ModelSerializer):
                 'description': item.get('description', ''),
                 'price': float(price) if price is not None else None,
                 'quantity': qty if qty > 0 else 1,
+                'package_index': int(item.get('package_index', 0) or 0),
             }
-            if 'package_index' in item:
-                entry['package_index'] = item['package_index']
             result.append(entry)
         return result
+
+    def get_packages(self, obj):
+        image_entries = []
+        for img in obj.images.all():
+            image_entries.append({
+                'id': img.id,
+                'image': absolute_media_url(
+                    img.image,
+                    self.context.get('request'),
+                    label=f'OrderImage #{img.pk}',
+                ),
+                'package_index': int(getattr(img, 'package_index', 0) or 0),
+            })
+        return reconstruct_packages(
+            obj.product_links,
+            image_entries,
+            expected_count=getattr(obj, 'expected_parcel_count', 1) or 1,
+        )
 
     def get_product_links_list(self, obj):
         return [
