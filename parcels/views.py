@@ -7,6 +7,7 @@ from rest_framework import generics, status, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django.db import transaction # Pour les opérations atomiques
 from django.http import Http404
 from .models import Order, Parcel, Consolidation, OrderImage, ImportBatch, ShipmentBatch, ExpeditionRequest
@@ -1315,6 +1316,7 @@ class ShipmentBatchGenerateView(APIView):
 
 class ShipmentBatchDetailView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get_object(self, pk):
         try:
