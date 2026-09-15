@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction # Pour les opérations atomiques
 from django.http import Http404
-from .models import Order, Parcel, Consolidation, OrderImage, ImportBatch, ShipmentBatch # Importez Consolidation
+from .models import Order, Parcel, Consolidation, OrderImage, ImportBatch, ShipmentBatch, ExpeditionRequest
 from .serializers import (
     OrderSerializer,
     ParcelSerializer,
@@ -21,7 +21,9 @@ from .serializers import (
     ConsolidationClientUpdateSerializer,
     ConsolidationUpdateSerializer,
     ShipmentBatchSerializer,
+    ExpeditionRequestSerializer,
 )
+from .expedition_utils import build_expedition_quote, parcel_volume_cbm
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from users.models import CustomUser
@@ -1000,6 +1002,21 @@ def _parcel_weight_for_mco(parcel) -> float:
     return 0.0
 
 
+def _parcel_cbm_for_mco(parcel) -> float:
+    return float(parcel_volume_cbm(parcel))
+
+
+def _batch_totals(parcels):
+    from decimal import Decimal
+
+    total_w = sum(_parcel_weight_for_mco(p) for p in parcels)
+    total_v = sum(_parcel_cbm_for_mco(p) for p in parcels)
+    return (
+        Decimal(str(round(total_w, 3))),
+        Decimal(str(round(total_v, 4))),
+    )
+
+
 def _next_mco_code() -> str:
     import re
 
@@ -1009,26 +1026,180 @@ def _next_mco_code() -> str:
         match = re.search(r'(\d+)', last.code)
         if match:
             n = int(match.group(1)) + 1
-    return f'MCO {n}'
+    return f'Expédition #{n}'
 
 
 def _eligible_mco_parcels():
-    """Colis groupés, consolidation completed avec fee, pas encore dans un MCO."""
+    """Colis avec expédition Bujito Digital payée, pas encore dans un MCO."""
     assigned_ids = (
         ShipmentBatch.objects.filter(parcels__isnull=False)
         .values_list('parcels__id', flat=True)
         .distinct()
     )
     return (
-        Parcel.objects.filter(status='consolidated')
-        .filter(
-            consolidations__status='completed',
-            consolidations__grouping_fee__isnull=False,
+        Parcel.objects.filter(
+            expeditions__mode='bujito_digital',
+            expeditions__status='paid',
         )
         .exclude(id__in=assigned_ids)
         .distinct()
-        .prefetch_related('consolidations')
+        .prefetch_related('expeditions', 'consolidations')
     )
+
+
+def _resolve_parcel_owner(parcel):
+    if parcel.order_id and parcel.order and parcel.order.user_id:
+        return parcel.order.user
+    cons = parcel.consolidations.order_by('-request_date').first()
+    if cons and cons.user_id:
+        return cons.user
+    return None
+
+
+def _expedition_quote_or_create(request, *, create: bool):
+    from decimal import Decimal
+
+    tracking_numbers = request.data.get('tracking_numbers') or []
+    parcel_ids = request.data.get('parcel_ids') or []
+    mode = (request.data.get('mode') or '').strip().lower()
+    category = request.data.get('shipping_category')
+    forwarder_fee = request.data.get('forwarder_delivery_fee')
+    volume_override = request.data.get('volume_cbm')
+    weight_override = request.data.get('weight_kg')
+
+    parcels = []
+    if tracking_numbers:
+        parcels = list(Parcel.objects.filter(tracking_number__in=tracking_numbers))
+    elif parcel_ids:
+        parcels = list(Parcel.objects.filter(id__in=parcel_ids))
+    if not parcels:
+        return Response(
+            {"detail": "tracking_numbers ou parcel_ids requis."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if create:
+        busy = (
+            ExpeditionRequest.objects.filter(
+                parcels__in=parcels,
+                status__in=['awaiting_payment', 'paid'],
+            )
+            .distinct()
+            .exists()
+        )
+        if busy:
+            return Response(
+                {"detail": "Un devis d'expédition est déjà actif pour ces colis."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    try:
+        quote = build_expedition_quote(
+            parcels=parcels,
+            mode=mode,
+            shipping_category=category,
+            forwarder_delivery_fee=forwarder_fee,
+            volume_cbm_override=volume_override,
+            weight_kg_override=weight_override,
+        )
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not create:
+        return Response(quote)
+
+    owner = _resolve_parcel_owner(parcels[0])
+    if owner is None:
+        return Response(
+            {"detail": "Impossible de déterminer le client du colis."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        exp = ExpeditionRequest.objects.create(
+            user=owner,
+            mode=quote['mode'],
+            shipping_category=quote.get('shipping_category'),
+            weight_kg=Decimal(str(quote['weight_kg'])),
+            volume_cbm=Decimal(str(quote['volume_cbm'])),
+            grouping_fee=Decimal(str(quote['grouping_fee'])),
+            shipping_fee=Decimal(str(quote['shipping_fee'])),
+            forwarder_delivery_fee=Decimal(str(quote['forwarder_delivery_fee'])),
+            cbm_fee=Decimal(str(quote['cbm_fee'])),
+            cbm_fee_advance=Decimal(str(quote['cbm_fee_advance'])),
+            total_due_now=Decimal(str(quote['total_due_now'])),
+            was_grouped=quote['was_grouped'],
+            status='awaiting_payment',
+            created_by=request.user,
+        )
+        exp.parcels.set(parcels)
+        # Persister CBM saisi sur le(s) colis si fourni
+        if volume_override is not None and len(parcels) == 1:
+            parcels[0].volume_cbm = Decimal(str(quote['volume_cbm']))
+            parcels[0].save(update_fields=['volume_cbm', 'last_updated'])
+
+    try:
+        send_fcm_notification(
+            owner,
+            "Devis d'expédition prêt",
+            f"Montant à payer : ${quote['total_due_now']:.2f}. "
+            f"Réf. expédition #{exp.pk}.",
+            type="payment",
+            reference_id=exp.pk,
+            data={"type": "expedition", "expedition_id": str(exp.pk)},
+            translate=False,
+        )
+    except Exception:
+        pass
+
+    return Response(
+        ExpeditionRequestSerializer(exp).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+class ExpeditionQuoteView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        return _expedition_quote_or_create(request, create=False)
+
+
+class ExpeditionListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = ExpeditionRequest.objects.prefetch_related('parcels').all()
+        if not is_app_admin(request.user):
+            qs = qs.filter(user=request.user)
+        status_filter = (request.query_params.get('status') or '').strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return Response(ExpeditionRequestSerializer(qs, many=True).data)
+
+    def post(self, request):
+        if not is_app_admin(request.user):
+            return Response({"detail": "Accès refusé."}, status=status.HTTP_403_FORBIDDEN)
+        return _expedition_quote_or_create(request, create=True)
+
+
+class ExpeditionDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk, user):
+        try:
+            exp = ExpeditionRequest.objects.prefetch_related('parcels').get(pk=pk)
+        except ExpeditionRequest.DoesNotExist:
+            return None
+        if not is_app_admin(user) and exp.user_id != user.id:
+            return None
+        return exp
+
+    def get(self, request, pk):
+        exp = self.get_object(pk, request.user)
+        if exp is None:
+            return Response({"detail": "Introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ExpeditionRequestSerializer(exp).data)
 
 
 class ShipmentBatchListCreateView(APIView):
@@ -1036,14 +1207,15 @@ class ShipmentBatchListCreateView(APIView):
 
     def get(self, request):
         batches = ShipmentBatch.objects.prefetch_related('parcels').all()
-        return Response(ShipmentBatchSerializer(batches, many=True).data)
+        return Response(
+            ShipmentBatchSerializer(batches, many=True, context={'request': request}).data
+        )
 
     def post(self, request):
         """Créer un lot manuel avec une liste de tracking_numbers."""
-        from decimal import Decimal
-
         tracking_numbers = request.data.get('tracking_numbers') or []
         notes = request.data.get('notes') or ''
+        admin_description = request.data.get('admin_description') or ''
         if not tracking_numbers:
             return Response(
                 {"detail": "tracking_numbers requis."},
@@ -1057,15 +1229,20 @@ class ShipmentBatchListCreateView(APIView):
                 {"detail": "Aucun colis trouvé."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        total = sum(_parcel_weight_for_mco(p) for p in parcels)
+        total_w, total_v = _batch_totals(parcels)
         batch = ShipmentBatch.objects.create(
             code=_next_mco_code(),
-            total_weight_kg=Decimal(str(round(total, 3))),
+            total_weight_kg=total_w,
+            total_volume_cbm=total_v,
             notes=notes,
+            admin_description=admin_description,
         )
+        if request.FILES.get('admin_photo'):
+            batch.admin_photo = request.FILES['admin_photo']
+            batch.save(update_fields=['admin_photo'])
         batch.parcels.set(parcels)
         return Response(
-            ShipmentBatchSerializer(batch).data,
+            ShipmentBatchSerializer(batch, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -1078,15 +1255,12 @@ class ShipmentBatchGenerateView(APIView):
     MAX_KG = 46.0
 
     def post(self, request):
-        from decimal import Decimal
-
         parcels = list(_eligible_mco_parcels())
         items = []
         for p in parcels:
             w = _parcel_weight_for_mco(p)
             if w > 0:
                 items.append((p, w))
-        # Plus lourds d'abord pour un packing plus stable
         items.sort(key=lambda x: x[1], reverse=True)
 
         batches_created = []
@@ -1099,21 +1273,25 @@ class ShipmentBatchGenerateView(APIView):
                 return
             if current_w < self.MIN_KG and not force:
                 return
+            ps = [p for p, _ in current]
+            total_w, total_v = _batch_totals(ps)
             batch = ShipmentBatch.objects.create(
                 code=_next_mco_code(),
-                total_weight_kg=Decimal(str(round(current_w, 3))),
+                total_weight_kg=total_w,
+                total_volume_cbm=total_v,
             )
-            batch.parcels.set([p for p, _ in current])
+            batch.parcels.set(ps)
             batches_created.append(batch)
             current = []
             current_w = 0.0
 
         for parcel, w in items:
             if w > self.MAX_KG:
-                # Colis trop lourd seul → lot dédié (admin pourra ajuster)
+                total_w, total_v = _batch_totals([parcel])
                 batch = ShipmentBatch.objects.create(
                     code=_next_mco_code(),
-                    total_weight_kg=Decimal(str(round(w, 3))),
+                    total_weight_kg=total_w,
+                    total_volume_cbm=total_v,
                     notes='Lot hors plage (colis > 46 kg)',
                 )
                 batch.parcels.set([parcel])
@@ -1123,15 +1301,14 @@ class ShipmentBatchGenerateView(APIView):
                 flush(force=True)
             current.append((parcel, w))
             current_w += w
-            if current_w >= self.MIN_KG:
-                # Continuer à remplir jusqu'à MAX, flush si prochain ne rentre pas
-                pass
 
         flush(force=True)
 
         return Response({
             "created_count": len(batches_created),
-            "batches": ShipmentBatchSerializer(batches_created, many=True).data,
+            "batches": ShipmentBatchSerializer(
+                batches_created, many=True, context={'request': request}
+            ).data,
             "eligible_remaining": _eligible_mco_parcels().count(),
         }, status=status.HTTP_201_CREATED if batches_created else status.HTTP_200_OK)
 
@@ -1149,7 +1326,9 @@ class ShipmentBatchDetailView(APIView):
         batch = self.get_object(pk)
         if batch is None:
             return Response({"detail": "Introuvable."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(ShipmentBatchSerializer(batch).data)
+        return Response(
+            ShipmentBatchSerializer(batch, context={'request': request}).data
+        )
 
     def patch(self, request, pk):
         from django.utils import timezone
@@ -1159,22 +1338,37 @@ class ShipmentBatchDetailView(APIView):
         if batch is None:
             return Response({"detail": "Introuvable."}, status=status.HTTP_404_NOT_FOUND)
 
+        update_fields = []
         new_status = request.data.get('status')
         if new_status:
             if new_status not in {c[0] for c in ShipmentBatch.STATUS_CHOICES}:
                 return Response({"detail": "Statut MCO invalide."}, status=status.HTTP_400_BAD_REQUEST)
             batch.status = new_status
+            update_fields.append('status')
             if new_status == 'shipped':
                 batch.shipped_at = timezone.now()
+                update_fields.append('shipped_at')
                 for parcel in batch.parcels.all():
                     parcel.status = 'in_transit'
                     parcel.save(update_fields=['status', 'last_updated'])
                     sync_completed_group_parcel_status(parcel)
-            batch.save()
 
         if 'notes' in request.data:
             batch.notes = request.data.get('notes') or ''
-            batch.save(update_fields=['notes'])
+            update_fields.append('notes')
 
-        return Response(ShipmentBatchSerializer(batch).data)
+        if 'admin_description' in request.data:
+            batch.admin_description = request.data.get('admin_description') or ''
+            update_fields.append('admin_description')
+
+        if request.FILES.get('admin_photo'):
+            batch.admin_photo = request.FILES['admin_photo']
+            update_fields.append('admin_photo')
+
+        if update_fields:
+            batch.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        return Response(
+            ShipmentBatchSerializer(batch, context={'request': request}).data
+        )
 

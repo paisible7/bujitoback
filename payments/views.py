@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
-from parcels.models import Order
+from parcels.models import Order, ExpeditionRequest
 
 from .models import PaymentMethod, Payment, SavedPaymentMethod
 from .serializers import (
@@ -214,7 +214,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         saved_method_id = request.data.get("saved_method_id")
         transfer_type = (request.data.get("type") or "").strip().lower()
         is_transfer = transfer_type == "money_transfer"
+        is_expedition = transfer_type == "expedition"
         proof_image = request.FILES.get("proof_image") if is_transfer else None
+        transfer_purpose = (request.data.get("purpose") or "").strip().lower() if is_transfer else ""
 
         if not method_code:
             return Response({"message": "method is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -228,6 +230,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"message": "Payment method inactive"}, status=status.HTTP_400_BAD_REQUEST)
 
         order = None
+        expedition = None
         amount = None
         meta = None
 
@@ -263,12 +266,63 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             if not phone_number:
                 phone_number = beneficiary_phone
 
+            if transfer_purpose and transfer_purpose not in {
+                "agent_transfer",
+                "alipay_recharge",
+                "china_supplier",
+                "other",
+            }:
+                return Response(
+                    {"message": "purpose invalide"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             meta = {
                 "type": "money_transfer",
                 "beneficiary_name": beneficiary_name,
                 "beneficiary_phone": beneficiary_phone,
                 "note": note,
                 "currency": transfer_currency,
+                "purpose": transfer_purpose or "other",
+            }
+        elif is_expedition:
+            expedition_id = request.data.get("expedition_id")
+            if not expedition_id:
+                return Response(
+                    {"message": "expedition_id is required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                expedition = ExpeditionRequest.objects.get(
+                    pk=int(expedition_id),
+                    user=request.user,
+                )
+            except Exception:
+                return Response(
+                    {"message": "Expedition not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if expedition.status != "awaiting_payment":
+                return Response(
+                    {"message": "Cette expédition n'est plus payable."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if expedition.total_due_now <= 0:
+                return Response(
+                    {"message": "Montant d'expédition invalide."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if expedition.payments.filter(status="completed").exists():
+                return Response(
+                    {"message": "Cette expédition est déjà payée."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            amount = expedition.total_due_now
+            transfer_currency = "USD"
+            meta = {
+                "type": "expedition",
+                "expedition_id": expedition.pk,
+                "mode": expedition.mode,
             }
         else:
             if not order_id:
@@ -305,7 +359,11 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             if not phone_number:
                 return Response({"message": "phone_number is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        simulate_card = method_code == "card" and not is_transfer and order is not None
+        simulate_card = (
+            method_code == "card"
+            and not is_transfer
+            and (order is not None or expedition is not None)
+        )
 
         with transaction.atomic():
             if order is not None:
@@ -336,9 +394,44 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                         user=request.user,
                         order=order,
                         amount=amount,
-                        currency=transfer_currency if is_transfer else "USD",
+                        currency="USD",
                         method=method,
-                        reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
+                        reference=f"PAY-{uuid.uuid4().hex[:10].upper()}",
+                        status="pending",
+                        phone_number=phone_number or None,
+                        provider_raw_response=meta,
+                    )
+            elif expedition is not None:
+                expedition = ExpeditionRequest.objects.select_for_update().get(pk=expedition.pk)
+                if expedition.payments.filter(status="completed").exists():
+                    return Response(
+                        {"message": "Cette expédition est déjà payée."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                pending_payment = (
+                    expedition.payments.filter(status="pending")
+                    .select_for_update()
+                    .first()
+                )
+                if pending_payment is not None:
+                    if not simulate_card:
+                        return Response(
+                            {
+                                "message": "Un paiement est déjà en attente pour cette expédition.",
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                    payment = pending_payment
+                    payment.method = method
+                    payment.phone_number = phone_number or payment.phone_number
+                else:
+                    payment = Payment.objects.create(
+                        user=request.user,
+                        expedition=expedition,
+                        amount=amount,
+                        currency="USD",
+                        method=method,
+                        reference=f"EXP-{uuid.uuid4().hex[:10].upper()}",
                         status="pending",
                         phone_number=phone_number or None,
                         provider_raw_response=meta,
@@ -517,9 +610,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         try:
-            payment = Payment.objects.select_related("user", "order", "method").get(
-                pk=pk
-            )
+            payment = Payment.objects.select_related(
+                "user", "order", "method", "expedition"
+            ).get(pk=pk)
         except Payment.DoesNotExist:
             return Response(
                 {"message": "Paiement non trouvé"},
@@ -548,6 +641,24 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     {
                         "message": (
                             "Impossible de confirmer : devis invalide "
+                            "ou montant ne correspond pas."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if new_status == "completed" and payment.expedition_id is not None:
+            expedition = payment.expedition
+            if (
+                expedition is None
+                or expedition.status != "awaiting_payment"
+                or expedition.total_due_now <= 0
+                or payment.amount != expedition.total_due_now
+            ):
+                return Response(
+                    {
+                        "message": (
+                            "Impossible de confirmer : expédition invalide "
                             "ou montant ne correspond pas."
                         )
                     },

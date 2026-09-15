@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage, ShipmentBatch
+from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage, ShipmentBatch, ExpeditionRequest
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
 from .quote_utils import (
@@ -21,6 +21,7 @@ class ParcelSerializer(serializers.ModelSerializer):
     was_grouped = serializers.SerializerMethodField()
     group_id = serializers.SerializerMethodField()
     mco_code = serializers.SerializerMethodField()
+    pending_expedition_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Parcel
@@ -28,11 +29,13 @@ class ParcelSerializer(serializers.ModelSerializer):
             'id', 'tracking_number', 'supplier_tracking_number',
             'order_sequence', 'status', 'current_location',
             'client_name', 'client_phone', 'weight_volume', 'weight_kg',
+            'volume_cbm',
             'warehouse_number', 'china_arrival_date', 'description',
             'image', 'package_photo', 'package_photos', 'last_updated', 'order',
             'user_email', 'was_grouped', 'group_id', 'mco_code',
+            'pending_expedition_id',
         ]
-        read_only_fields = ('last_updated', 'mco_code')
+        read_only_fields = ('last_updated', 'mco_code', 'pending_expedition_id')
 
     def get_was_grouped(self, obj):
         return obj.consolidations.filter(status='completed').exists()
@@ -47,6 +50,14 @@ class ParcelSerializer(serializers.ModelSerializer):
             return None
         batches.sort(key=lambda b: b.created_at or b.pk, reverse=True)
         return batches[0].code
+
+    def get_pending_expedition_id(self, obj):
+        exp = (
+            obj.expeditions.filter(status='awaiting_payment')
+            .order_by('-created_at')
+            .first()
+        )
+        return exp.pk if exp else None
 
     def get_image(self, obj):
         urls = self._all_image_urls(obj)
@@ -94,20 +105,69 @@ class ParcelSerializer(serializers.ModelSerializer):
 class ShipmentBatchSerializer(serializers.ModelSerializer):
     parcel_count = serializers.SerializerMethodField()
     tracking_numbers = serializers.SerializerMethodField()
+    admin_photo_url = serializers.SerializerMethodField()
+    expedition_label = serializers.SerializerMethodField()
 
     class Meta:
         model = ShipmentBatch
         fields = [
-            'id', 'code', 'status', 'total_weight_kg', 'parcel_count',
+            'id', 'code', 'expedition_label', 'status',
+            'total_weight_kg', 'total_volume_cbm', 'parcel_count',
             'tracking_numbers', 'created_at', 'shipped_at', 'notes',
+            'admin_description', 'admin_photo_url',
         ]
-        read_only_fields = ('code', 'total_weight_kg', 'created_at', 'shipped_at')
+        read_only_fields = (
+            'code', 'total_weight_kg', 'total_volume_cbm',
+            'created_at', 'shipped_at', 'expedition_label', 'admin_photo_url',
+        )
 
     def get_parcel_count(self, obj):
         return obj.parcels.count()
 
     def get_tracking_numbers(self, obj):
         return list(obj.parcels.values_list('tracking_number', flat=True))
+
+    def get_admin_photo_url(self, obj):
+        return absolute_media_url(
+            obj.admin_photo,
+            self.context.get('request'),
+            label=f'ShipmentBatch #{obj.pk} admin photo',
+        )
+
+    def get_expedition_label(self, obj):
+        import re
+        if obj.code:
+            match = re.search(r'(\d+)', obj.code)
+            if match:
+                return f"Expédition #{match.group(1)}"
+        return f"Expédition #{obj.pk}"
+
+
+class ExpeditionRequestSerializer(serializers.ModelSerializer):
+    tracking_numbers = serializers.SerializerMethodField()
+    parcel_ids = serializers.SerializerMethodField()
+    cbm_fee_remaining = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ExpeditionRequest
+        fields = [
+            'id', 'mode', 'shipping_category', 'status',
+            'weight_kg', 'volume_cbm', 'was_grouped',
+            'grouping_fee', 'shipping_fee', 'forwarder_delivery_fee',
+            'cbm_fee', 'cbm_fee_advance', 'cbm_fee_remaining', 'total_due_now',
+            'tracking_numbers', 'parcel_ids',
+            'created_at', 'paid_at', 'user',
+        ]
+        read_only_fields = fields
+
+    def get_tracking_numbers(self, obj):
+        return list(obj.parcels.values_list('tracking_number', flat=True))
+
+    def get_parcel_ids(self, obj):
+        return list(obj.parcels.values_list('id', flat=True))
+
+    def get_cbm_fee_remaining(self, obj):
+        return float((obj.cbm_fee or 0) - (obj.cbm_fee_advance or 0))
 
 class OrderImageSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()

@@ -28,15 +28,18 @@ class PaymentSerializer(serializers.ModelSerializer):
     client_name = serializers.SerializerMethodField()
     proof_image_url = serializers.SerializerMethodField()
     is_transfer = serializers.SerializerMethodField()
+    is_expedition = serializers.SerializerMethodField()
     beneficiary_name = serializers.SerializerMethodField()
     beneficiary_phone = serializers.SerializerMethodField()
     note = serializers.SerializerMethodField()
+    purpose = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = [
             'id',
             'order',
+            'expedition',
             'amount',
             'currency',
             'method',
@@ -48,9 +51,11 @@ class PaymentSerializer(serializers.ModelSerializer):
             'client_name',
             'proof_image_url',
             'is_transfer',
+            'is_expedition',
             'beneficiary_name',
             'beneficiary_phone',
             'note',
+            'purpose',
         ]
         read_only_fields = ['reference', 'status', 'created_at', 'proof_image_url']
 
@@ -77,7 +82,13 @@ class PaymentSerializer(serializers.ModelSerializer):
         if meta.get('type') == 'money_transfer':
             return True
         ref = (obj.reference or '')
-        return obj.order_id is None and ref.startswith('TRF')
+        return obj.order_id is None and obj.expedition_id is None and ref.startswith('TRF')
+
+    def get_is_expedition(self, obj):
+        meta = _payment_meta(obj)
+        if meta.get('type') == 'expedition':
+            return True
+        return obj.expedition_id is not None
 
     def get_beneficiary_name(self, obj):
         return (_payment_meta(obj).get('beneficiary_name') or '').strip() or None
@@ -87,3 +98,6 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     def get_note(self, obj):
         return (_payment_meta(obj).get('note') or '').strip() or None
+
+    def get_purpose(self, obj):
+        return (_payment_meta(obj).get('purpose') or '').strip() or None

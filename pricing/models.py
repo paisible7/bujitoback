@@ -119,6 +119,28 @@ class BusinessSettings(models.Model):
         verbose_name=_("Entrepôt Chine — adresse"),
     )
 
+    # --- CBM ---
+    cbm_rate_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("350.00"),
+        verbose_name=_("CBM — $/m³"),
+    )
+
+    # --- QR paiements Chine (transferts agents / Alipay / fournisseurs) ---
+    alipay_qr_image = models.ImageField(
+        upload_to='pricing/qr/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_("QR Alipay"),
+    )
+    wechat_qr_image = models.ImageField(
+        upload_to='pricing/qr/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_("QR WeChat Pay"),
+    )
+
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

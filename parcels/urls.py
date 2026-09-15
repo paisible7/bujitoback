@@ -16,6 +16,9 @@ from .views import (
     ShipmentBatchGenerateView,
     ShipmentBatchDetailView,
     ConsolidationBulkStatusView,
+    ExpeditionQuoteView,
+    ExpeditionListCreateView,
+    ExpeditionDetailView,
 )
 
 urlpatterns = [
@@ -34,6 +37,11 @@ urlpatterns = [
     path('parcels/groups/', ConsolidationListView.as_view(), name='consolidation-list'),
     path('parcels/groups/bulk-status/', ConsolidationBulkStatusView.as_view(), name='consolidation-bulk-status'),
     path('parcels/groups/<int:pk>/', ConsolidationDetailView.as_view(), name='consolidation-detail'),
+
+    # Expéditions (devis + paiement client)
+    path('expeditions/quote/', ExpeditionQuoteView.as_view(), name='expedition-quote'),
+    path('expeditions/', ExpeditionListCreateView.as_view(), name='expedition-list-create'),
+    path('expeditions/<int:pk>/', ExpeditionDetailView.as_view(), name='expedition-detail'),
 
     # Lots MCO
     path('shipments/', ShipmentBatchListCreateView.as_view(), name='shipment-list-create'),

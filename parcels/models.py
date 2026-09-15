@@ -109,6 +109,13 @@ class Parcel(models.Model):
         blank=True,
         verbose_name=_("Poids (kg)"),
     )
+    volume_cbm = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        verbose_name=_("Volume (CBM)"),
+    )
     warehouse_number = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("N° Entrepôt"))
     china_arrival_date = models.DateField(
         null=True,
@@ -335,6 +342,12 @@ class ShipmentBatch(models.Model):
         default=0,
         verbose_name=_("Poids total (kg)"),
     )
+    total_volume_cbm = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        verbose_name=_("Volume total (CBM)"),
+    )
     parcels = models.ManyToManyField(
         Parcel,
         related_name='shipment_batches',
@@ -344,6 +357,17 @@ class ShipmentBatch(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Créé le"))
     shipped_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Expédié le"))
     notes = models.TextField(blank=True, default='', verbose_name=_("Notes"))
+    admin_description = models.TextField(
+        blank=True,
+        default='',
+        verbose_name=_("Description admin (expédition)"),
+    )
+    admin_photo = models.ImageField(
+        upload_to='shipments/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_("Photo admin (expédition)"),
+    )
 
     class Meta:
         ordering = ['-created_at']
@@ -352,3 +376,116 @@ class ShipmentBatch(models.Model):
 
     def __str__(self):
         return self.code
+
+
+class ExpeditionRequest(models.Model):
+    """Devis d'expédition (Bujito Digital ou autre transitaire) à payer par le client."""
+
+    MODE_CHOICES = [
+        ('bujito_digital', _('Expédier par Bujito Digital')),
+        ('other_forwarder', _('Expédier par un autre transitaire')),
+    ]
+    CATEGORY_CHOICES = [
+        ('ordinary', _('Colis ordinaire')),
+        ('sensitive', _('Colis sensibles')),
+        ('phone', _('Téléphone')),
+    ]
+    STATUS_CHOICES = [
+        ('quoted', _('Devis')),
+        ('awaiting_payment', _('En attente de paiement')),
+        ('paid', _('Payé')),
+        ('cancelled', _('Annulé')),
+    ]
+
+    user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name='expeditions',
+        verbose_name=_("Client"),
+    )
+    parcels = models.ManyToManyField(
+        Parcel,
+        related_name='expeditions',
+        verbose_name=_("Colis"),
+    )
+    mode = models.CharField(max_length=30, choices=MODE_CHOICES, verbose_name=_("Mode"))
+    shipping_category = models.CharField(
+        max_length=20,
+        choices=CATEGORY_CHOICES,
+        blank=True,
+        null=True,
+        verbose_name=_("Catégorie d'expédition"),
+    )
+    weight_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        default=0,
+        verbose_name=_("Poids (kg)"),
+    )
+    volume_cbm = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        verbose_name=_("Volume (CBM)"),
+    )
+    grouping_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Frais de groupage (USD)"),
+    )
+    shipping_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Frais d'expédition (USD)"),
+    )
+    forwarder_delivery_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Frais livraison autre transitaire (USD)"),
+    )
+    cbm_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Frais CBM total (USD)"),
+    )
+    cbm_fee_advance = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Acompte CBM 50% (USD)"),
+    )
+    total_due_now = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Montant dû maintenant (USD)"),
+    )
+    was_grouped = models.BooleanField(default=False, verbose_name=_("Colis groupé"))
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='awaiting_payment',
+        verbose_name=_("Statut"),
+    )
+    created_by = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='expeditions_created',
+        verbose_name=_("Créé par"),
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Créé le"))
+    paid_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Payé le"))
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = _("Demande d'expédition")
+        verbose_name_plural = _("Demandes d'expédition")
+
+    def __str__(self):
+        return f"Expedition #{self.pk} — {self.mode} ({self.status})"

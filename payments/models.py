@@ -1,4 +1,4 @@
-﻿from django.db import models
+from django.db import models
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
@@ -61,6 +61,14 @@ class Payment(models.Model):
         blank=True,
         related_name='payments',
         verbose_name=_("Commande"),
+    )
+    expedition = models.ForeignKey(
+        'parcels.ExpeditionRequest',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+        verbose_name=_("Expédition"),
     )
     amount = models.DecimalField(max_digits=10, decimal_places=2, verbose_name=_("Montant"))
     currency = models.CharField(max_length=10, default='FCFA', verbose_name=_("Devise"))

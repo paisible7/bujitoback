@@ -26,9 +26,34 @@ def _payment_pre_save(sender, instance: Payment, **kwargs):
 
 @receiver(post_save, sender=Payment)
 def _payment_post_save(sender, instance: Payment, created: bool, **kwargs):
-    if instance.status != "completed" or instance.order_id is None:
+    if instance.status != "completed":
         return
     if getattr(instance, "_old_status", None) == "completed":
+        return
+
+    # Expédition payée → marquer paid (éligible MCO si Bujito Digital)
+    if instance.expedition_id is not None:
+        expedition_id = instance.expedition_id
+
+        def mark_expedition() -> None:
+            from django.utils import timezone
+            from parcels.models import ExpeditionRequest
+
+            updated = ExpeditionRequest.objects.filter(
+                pk=expedition_id,
+                status="awaiting_payment",
+            ).update(status="paid", paid_at=timezone.now())
+            if not updated:
+                logger.info(
+                    "Payment %s completed but expedition %s was not awaiting payment.",
+                    instance.pk,
+                    expedition_id,
+                )
+
+        transaction.on_commit(mark_expedition, robust=True)
+        return
+
+    if instance.order_id is None:
         return
 
     order = instance.order
