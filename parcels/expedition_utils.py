@@ -1,4 +1,4 @@
-"""Calculs de devis d'expédition (Bujito Digital / autre transitaire)."""
+"""Calculs d'expédition (Bujito Digital / autre transitaire)."""
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
@@ -11,6 +11,8 @@ from .weight_utils import parse_weight_kg
 
 ZERO = Decimal("0.00")
 CBM_ADVANCE_RATIO = Decimal("0.50")
+AIR_LOYALTY_STARS = 5
+AIR_LOYALTY_DISCOUNT = Decimal("0.50")  # 50 % sur solutions aériennes
 
 
 def _to_decimal(value) -> Decimal:
@@ -88,15 +90,22 @@ def build_expedition_quote(
     *,
     parcels: list,
     mode: str,
+    transport_mode: str | None = None,
     shipping_category: str | None = None,
     forwarder_delivery_fee=None,
+    forwarder_address: str | None = None,
     volume_cbm_override=None,
     weight_kg_override=None,
     settings: BusinessSettings | None = None,
+    client_stars: int | None = None,
 ) -> dict[str, Any]:
     """
-    Calcule le devis d'expédition.
-    total_due_now = frais applicables + 50% du CBM.
+    Calcule le montant d'expédition à partir des tarifs et du colis.
+
+    - Bujito + avion  → poids × tarif catégorie ($/kg)
+      (clients 5★ : −50 % sur le frais aérien)
+    - Bujito + bateau → volume × tarif CBM (acompte 50 %)
+    - Autre transitaire → uniquement frais de transfert (fixis par l'admin)
     """
     cfg = settings or BusinessSettings.load()
     mode = (mode or "").strip().lower()
@@ -119,57 +128,108 @@ def build_expedition_quote(
 
     was_grouped = any(parcel_is_grouped(p) for p in parcels)
     grouping_fee = ZERO
-    if was_grouped:
-        # Une seule consolidation typique : prendre le fee du 1er colis groupé
+    if was_grouped and mode == "bujito_digital":
         for p in parcels:
             fee = parcel_grouping_fee(p)
             if fee is not None:
                 grouping_fee = fee
                 break
         if grouping_fee <= 0 and weight > 0:
-            grouping_fee = _to_decimal(grouping_cost(weight_kg=weight, settings=cfg)["amount_usd"])
+            grouping_fee = _to_decimal(
+                grouping_cost(weight_kg=weight, settings=cfg)["amount_usd"]
+            )
 
     shipping_fee = ZERO
+    shipping_fee_before_discount = ZERO
+    loyalty_discount_usd = ZERO
+    loyalty_air_discount_applied = False
+    cbm_fee = ZERO
+    cbm_advance = ZERO
     category = None
-    if mode == "bujito_digital":
-        category = (shipping_category or "ordinary").strip().lower()
-        if category not in {"ordinary", "sensitive", "phone"}:
-            category = "ordinary"
-        ship = shipping_cost(category=category, weight_kg=weight, settings=cfg)
-        if not ship.get("available", True):
-            raise ValueError(ship.get("message") or "catégorie indisponible")
-        shipping_fee = _to_decimal(ship["amount_usd"])
+    transport = (transport_mode or "").strip().lower() or None
+    address = (forwarder_address or "").strip()
+    stars = int(client_stars or 0)
 
-    forwarder_fee = ZERO
-    if mode == "other_forwarder":
+    if mode == "bujito_digital":
+        if transport not in {"air", "sea"}:
+            raise ValueError("Choisissez le transport : avion ou bateau.")
+        if transport == "air":
+            category = (shipping_category or "ordinary").strip().lower()
+            if category not in {"ordinary", "sensitive", "phone"}:
+                category = "ordinary"
+            if weight <= 0 and category != "phone":
+                raise ValueError(
+                    "Poids du colis manquant : impossible de calculer le tarif avion."
+                )
+            ship = shipping_cost(category=category, weight_kg=weight, settings=cfg)
+            if not ship.get("available", True):
+                raise ValueError(ship.get("message") or "catégorie indisponible")
+            shipping_fee_before_discount = _to_decimal(ship["amount_usd"])
+            shipping_fee = shipping_fee_before_discount
+            if stars >= AIR_LOYALTY_STARS and shipping_fee > 0:
+                loyalty_discount_usd = (
+                    shipping_fee * AIR_LOYALTY_DISCOUNT
+                ).quantize(Decimal("0.01"))
+                shipping_fee = (
+                    shipping_fee - loyalty_discount_usd
+                ).quantize(Decimal("0.01"))
+                loyalty_air_discount_applied = True
+        else:
+            if volume <= 0:
+                raise ValueError(
+                    "Volume (CBM) du colis manquant : impossible de calculer le tarif bateau."
+                )
+            cbm = cbm_cost(volume_cbm=volume, settings=cfg)
+            cbm_fee = _to_decimal(cbm["amount_usd"])
+            cbm_advance = _to_decimal(cbm["advance_usd"])
+
+        total_due_now = (
+            (grouping_fee if was_grouped else ZERO) + shipping_fee + cbm_advance
+        ).quantize(Decimal("0.01"))
+        status = "awaiting_payment"
+        forwarder_fee = ZERO
+
+    else:
+        # Autre transitaire : adresse obligatoire, frais de transfert seuls.
+        if not address:
+            raise ValueError("Indiquez l'adresse du transitaire.")
         forwarder_fee = _to_decimal(forwarder_delivery_fee)
         if forwarder_fee < 0:
             raise ValueError("forwarder_delivery_fee invalide")
-
-    cbm = cbm_cost(volume_cbm=volume, settings=cfg)
-    cbm_fee = _to_decimal(cbm["amount_usd"])
-    cbm_advance = _to_decimal(cbm["advance_usd"])
-
-    if mode == "bujito_digital":
-        base = (grouping_fee if was_grouped else ZERO) + shipping_fee
-    else:
-        base = (grouping_fee if was_grouped else ZERO) + forwarder_fee
-
-    total_due_now = (base + cbm_advance).quantize(Decimal("0.01"))
+        if forwarder_fee > 0:
+            total_due_now = forwarder_fee.quantize(Decimal("0.01"))
+            status = "awaiting_payment"
+        else:
+            total_due_now = ZERO
+            status = "quoted"
 
     return {
         "mode": mode,
+        "transport_mode": transport,
         "shipping_category": category,
+        "forwarder_address": address,
         "was_grouped": was_grouped,
         "weight_kg": float(weight),
         "volume_cbm": float(volume),
-        "grouping_fee": float(grouping_fee if was_grouped else ZERO),
+        "grouping_fee": float(grouping_fee if was_grouped and mode == "bujito_digital" else ZERO),
         "shipping_fee": float(shipping_fee),
-        "forwarder_delivery_fee": float(forwarder_fee),
+        "shipping_fee_before_discount": float(
+            shipping_fee_before_discount
+            if shipping_fee_before_discount > 0
+            else shipping_fee
+        ),
+        "loyalty_discount_usd": float(loyalty_discount_usd),
+        "loyalty_air_discount_applied": loyalty_air_discount_applied,
+        "loyalty_air_discount_pct": float(AIR_LOYALTY_DISCOUNT * 100)
+        if loyalty_air_discount_applied
+        else 0.0,
+        "client_stars": stars,
+        "forwarder_delivery_fee": float(forwarder_fee if mode == "other_forwarder" else ZERO),
         "cbm_fee": float(cbm_fee),
         "cbm_fee_advance": float(cbm_advance),
         "cbm_fee_remaining": float((cbm_fee - cbm_advance).quantize(Decimal("0.01"))),
         "total_due_now": float(total_due_now),
+        "status": status,
         "parcel_ids": [p.pk for p in parcels],
         "tracking_numbers": [p.tracking_number for p in parcels if p.tracking_number],
     }

@@ -156,6 +156,9 @@ def flatten_packages(packages) -> tuple[list[dict[str, Any]], int, str | None]:
 
         links = package.get('links') or package.get('product_items') or package.get('items') or []
         link_items = normalize_incoming_links(links)
+        # Un seul lien produit par colis.
+        if len(link_items) > 1:
+            link_items = link_items[:1]
         if not link_items and description:
             link_items = [{'url': '', 'description': description, 'quantity': _to_qty(package.get('quantity', 1))}]
         elif not link_items and package.get('quantity'):

@@ -25,6 +25,7 @@ from .serializers import (
     ExpeditionRequestSerializer,
 )
 from .expedition_utils import build_expedition_quote, parcel_volume_cbm
+from .ownership import parcels_for_user_q, user_owns_parcel
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from users.models import CustomUser
@@ -261,6 +262,7 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
 class ParcelListCreateView(generics.ListCreateAPIView):
     serializer_class = ParcelSerializer
     permission_classes = [IsAuthenticated] # IsAdminUser checks method, but we filter queryset
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
     filter_backends = [filters.SearchFilter]
     search_fields = [
         'tracking_number',
@@ -280,7 +282,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         )
         if is_app_admin(self.request.user):
             return queryset
-        return queryset.filter(order__user=self.request.user)
+        return queryset.filter(parcels_for_user_q(self.request.user)).distinct()
 
     def perform_create(self, serializer):
         # Still check for admin for POST via IsAdminUser if we use it,
@@ -288,6 +290,145 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
         serializer.save()
+
+    def create(self, request, *args, **kwargs):
+        """Enregistrement manuel d'un colis depuis l'app (sans Excel)."""
+        from datetime import date as date_cls
+        from decimal import Decimal, InvalidOperation
+
+        from .weight_utils import parse_weight_kg, parse_china_date
+
+        if not is_app_admin(request.user):
+            return Response(
+                {"detail": "Accès refusé."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        data = request.data
+        tracking = str(data.get('tracking_number') or '').strip()
+        supplier_tracking = str(data.get('supplier_tracking_number') or '').strip()
+        if not tracking and not supplier_tracking:
+            return Response(
+                {"detail": "tracking_number ou supplier_tracking_number requis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user_email = (data.get('user_email') or '').strip()
+        client_phone = (data.get('client_phone') or '').strip()
+        user = None
+        if user_email:
+            user = CustomUser.objects.filter(email__iexact=user_email).first()
+        elif client_phone:
+            clean_phone = client_phone.replace(' ', '')
+            user = CustomUser.objects.filter(
+                phone_number__icontains=clean_phone
+            ).first()
+
+        order_id = data.get('order') or data.get('order_id')
+        order_sequence = data.get('order_sequence')
+        try:
+            order_sequence = int(order_sequence) if order_sequence not in (None, '') else None
+        except (TypeError, ValueError):
+            order_sequence = None
+        order = None
+        if order_id:
+            order = Order.objects.filter(id=order_id).first()
+        elif user:
+            order = (
+                Order.objects.filter(
+                    user=user,
+                    status__in=['pending', 'processing'],
+                )
+                .order_by('-order_date')
+                .first()
+            )
+
+        weight_volume = data.get('weight_volume')
+        weight_kg = parse_weight_kg(
+            data.get('weight_kg')
+            if data.get('weight_kg') not in (None, '')
+            else weight_volume
+        )
+        volume_cbm = None
+        raw_cbm = data.get('volume_cbm')
+        if raw_cbm not in (None, ''):
+            try:
+                volume_cbm = Decimal(str(raw_cbm).replace(',', '.'))
+            except (InvalidOperation, TypeError, ValueError):
+                volume_cbm = None
+
+        status_val = (data.get('status') or 'pending').strip().lower()
+        allowed = {c[0] for c in Parcel.PARCEL_STATUS_CHOICES}
+        if status_val not in allowed:
+            status_val = 'pending'
+
+        china_date = parse_china_date(data.get('china_arrival_date'))
+        if china_date is None and status_val == 'pending':
+            china_date = date_cls.today()
+
+        existing = None
+        if tracking:
+            existing = Parcel.objects.filter(tracking_number=tracking).first()
+        if existing is None and supplier_tracking:
+            existing = Parcel.objects.filter(
+                supplier_tracking_number=supplier_tracking
+            ).first()
+        if existing is not None:
+            return Response(
+                {
+                    "detail": (
+                        f"Un colis existe déjà "
+                        f"({existing.tracking_number or existing.pk})."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        parcel = Parcel(
+            tracking_number=tracking or supplier_tracking,
+            supplier_tracking_number=supplier_tracking or None,
+            order=order,
+            order_sequence=order_sequence,
+            status=status_val,
+            current_location=(data.get('current_location') or '').strip() or None,
+            description=(data.get('description') or '').strip() or None,
+            client_name=(data.get('client_name') or '').strip() or None,
+            client_phone=client_phone or None,
+            weight_volume=weight_volume or None,
+            warehouse_number=(data.get('warehouse_number') or '').strip() or None,
+            china_arrival_date=china_date,
+        )
+        if weight_kg is not None:
+            parcel.weight_kg = weight_kg
+        if volume_cbm is not None and volume_cbm >= 0:
+            parcel.volume_cbm = volume_cbm
+
+        image_file = request.FILES.get('image') or request.FILES.get('package_photo')
+        if image_file is not None:
+            parcel.image = image_file
+        else:
+            image_data = data.get('package_photo') or data.get('image')
+            if (
+                image_data
+                and isinstance(image_data, str)
+                and image_data.startswith('data:image')
+            ):
+                try:
+                    header, imgstr = image_data.split(';base64,')
+                    ext = header.split('/')[-1]
+                    parcel.image = ContentFile(
+                        base64.b64decode(imgstr),
+                        name=f"parcel_{parcel.tracking_number}.{ext}",
+                    )
+                except Exception:
+                    pass
+
+        parcel.save()
+        return Response(
+            ParcelSerializer(parcel, context={'request': request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
 
 class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ParcelSerializer
@@ -303,7 +444,7 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
         obj = super().get_object()
         if is_app_admin(self.request.user):
             return obj
-        if obj.order and obj.order.user == self.request.user:
+        if user_owns_parcel(self.request.user, obj):
             return obj
         self.permission_denied(self.request)
 
@@ -341,7 +482,7 @@ class ParcelTrackView(generics.RetrieveAPIView):
 
 class ParcelGroupView(APIView):
     permission_classes = [IsAuthenticated]
-    http_method_names = ['post'] # Ajout explicite de la méthode POST
+    http_method_names = ['post']
 
     def post(self, request, *args, **kwargs):
         serializer = ConsolidationCreateSerializer(data=request.data)
@@ -350,38 +491,45 @@ class ParcelGroupView(APIView):
         client_note = serializer.validated_data.get('client_note') or ''
 
         user = request.user
-        eligible_statuses = ['pending']  # Uniquement « en attente » avant groupage
+        eligible_statuses = ['pending']  # Arrivé à l'entrepôt
 
         with transaction.atomic():
             parcels_to_group = []
             for tn in tracking_numbers:
                 try:
-                    parcel = Parcel.objects.get(tracking_number=tn)
-                    if not parcel.order or parcel.order.user != user:
-                        return Response(
-                            {"detail": f"Le colis {tn} n'appartient pas à l'utilisateur."},
-                            status=status.HTTP_403_FORBIDDEN
-                        )
-                    if parcel.status not in eligible_statuses:
-                        return Response(
-                            {"detail": f"Le colis {tn} n'est pas éligible au groupage (doit être « En attente »)."},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-                    already_grouped = Consolidation.objects.filter(
-                        status__in=['pending', 'processing'],
-                        parcels=parcel,
-                    ).exists()
-                    if already_grouped:
-                        return Response(
-                            {"detail": f"Le colis {tn} fait déjà partie d'une demande de groupage en cours."},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-                    parcels_to_group.append(parcel)
+                    parcel = Parcel.objects.select_related('order__user').get(
+                        tracking_number=tn
+                    )
                 except Parcel.DoesNotExist:
                     return Response(
                         {"detail": f"Le colis avec le numéro de suivi {tn} n'existe pas."},
                         status=status.HTTP_404_NOT_FOUND
                     )
+                if not user_owns_parcel(user, parcel):
+                    return Response(
+                        {"detail": f"Le colis {tn} n'appartient pas à l'utilisateur."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+                if parcel.status not in eligible_statuses:
+                    return Response(
+                        {
+                            "detail": (
+                                f"Le colis {tn} n'est pas éligible au groupage "
+                                "(doit être « Arrivé à l'entrepôt »)."
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                already_grouped = Consolidation.objects.filter(
+                    status__in=['pending', 'processing'],
+                    parcels=parcel,
+                ).exists()
+                if already_grouped:
+                    return Response(
+                        {"detail": f"Le colis {tn} fait déjà partie d'une demande de groupage en cours."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                parcels_to_group.append(parcel)
 
             consolidation = Consolidation.objects.create(
                 user=user,
@@ -390,14 +538,15 @@ class ParcelGroupView(APIView):
             )
             consolidation.parcels.set(parcels_to_group)
 
-            # Notifier après liaison M2M (post_save à la création voit 0 colis).
-            parcel_count = len(parcels_to_group)
-            admin_body = (
-                f"{user.email} demande le groupage de {parcel_count} colis "
-                f"(#{consolidation.pk})."
-            )
-            if client_note:
-                admin_body = f"{admin_body} Description: {client_note}"
+        # Notifications hors transaction : un échec FCM ne doit pas annuler la demande.
+        parcel_count = len(parcels_to_group)
+        admin_body = (
+            f"{user.email} demande le groupage de {parcel_count} colis "
+            f"(#{consolidation.pk})."
+        )
+        if client_note:
+            admin_body = f"{admin_body} Description: {client_note}"
+        try:
             notify_admins(
                 "Nouvelle demande de groupage",
                 admin_body,
@@ -413,9 +562,13 @@ class ParcelGroupView(APIView):
                 reference_id=consolidation.pk,
                 data={"type": "consolidation", "reference_id": consolidation.pk},
             )
+        except Exception:
+            pass
 
-            response_serializer = ConsolidationSerializer(consolidation)
-            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        response_serializer = ConsolidationSerializer(
+            consolidation, context={'request': request}
+        )
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class ConsolidationListView(generics.ListAPIView):
@@ -612,6 +765,14 @@ class ParcelBulkImportView(APIView):
                     weight_kg = parse_weight_kg(
                         data.get('weight_kg') if data.get('weight_kg') not in (None, '') else weight_volume
                     )
+                    volume_cbm = None
+                    raw_cbm = data.get('volume_cbm')
+                    if raw_cbm not in (None, ''):
+                        try:
+                            from decimal import Decimal, InvalidOperation
+                            volume_cbm = Decimal(str(raw_cbm).replace(',', '.'))
+                        except (InvalidOperation, TypeError, ValueError):
+                            volume_cbm = None
                     china_date = parse_china_date(
                         data.get('china_arrival_date') or data.get('arrival_date')
                     )
@@ -627,6 +788,8 @@ class ParcelBulkImportView(APIView):
                     }
                     if weight_kg is not None:
                         defaults['weight_kg'] = weight_kg
+                    if volume_cbm is not None and volume_cbm >= 0:
+                        defaults['volume_cbm'] = volume_cbm
                     if china_date is not None:
                         defaults['china_arrival_date'] = china_date
                     elif status_val == 'pending':
@@ -1054,6 +1217,16 @@ def _resolve_parcel_owner(parcel):
     cons = parcel.consolidations.order_by('-request_date').first()
     if cons and cons.user_id:
         return cons.user
+    phone = "".join(ch for ch in (parcel.client_phone or "") if ch.isdigit())
+    if phone and len(phone) >= 8:
+        tail = phone[-9:] if len(phone) > 9 else phone
+        match = (
+            CustomUser.objects.filter(phone_number__icontains=tail)
+            .order_by('id')
+            .first()
+        )
+        if match is not None:
+            return match
     return None
 
 
@@ -1063,45 +1236,86 @@ def _expedition_quote_or_create(request, *, create: bool):
     tracking_numbers = request.data.get('tracking_numbers') or []
     parcel_ids = request.data.get('parcel_ids') or []
     mode = (request.data.get('mode') or '').strip().lower()
+    transport_mode = request.data.get('transport_mode')
     category = request.data.get('shipping_category')
     forwarder_fee = request.data.get('forwarder_delivery_fee')
+    forwarder_address = request.data.get('forwarder_address')
     volume_override = request.data.get('volume_cbm')
     weight_override = request.data.get('weight_kg')
+    admin = is_app_admin(request.user)
+
+    # Seul l'admin peut forcer poids / CBM ; le client ne fixe pas les frais transfert.
+    if not admin:
+        volume_override = None
+        weight_override = None
+        if mode == 'other_forwarder':
+            forwarder_fee = None
 
     parcels = []
     if tracking_numbers:
-        parcels = list(Parcel.objects.filter(tracking_number__in=tracking_numbers))
+        parcels = list(
+            Parcel.objects.select_related('order__user').filter(
+                tracking_number__in=tracking_numbers
+            )
+        )
     elif parcel_ids:
-        parcels = list(Parcel.objects.filter(id__in=parcel_ids))
+        parcels = list(
+            Parcel.objects.select_related('order__user').filter(id__in=parcel_ids)
+        )
     if not parcels:
         return Response(
             {"detail": "tracking_numbers ou parcel_ids requis."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if not admin:
+        for parcel in parcels:
+            if not user_owns_parcel(request.user, parcel):
+                return Response(
+                    {
+                        "detail": (
+                            f"Le colis {parcel.tracking_number} "
+                            "ne vous appartient pas."
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
     if create:
         busy = (
             ExpeditionRequest.objects.filter(
                 parcels__in=parcels,
-                status__in=['awaiting_payment', 'paid'],
+                status__in=['quoted', 'awaiting_payment', 'paid'],
             )
             .distinct()
             .exists()
         )
         if busy:
             return Response(
-                {"detail": "Un devis d'expédition est déjà actif pour ces colis."},
+                {"detail": "Une demande d'expédition est déjà active pour ces colis."},
                 status=status.HTTP_409_CONFLICT,
             )
+
+    # Étoiles du client (bénéficiaire) pour la réduction aérienne 5★.
+    if admin:
+        owner_preview = _resolve_parcel_owner(parcels[0])
+        client_stars = (
+            int(getattr(owner_preview, 'stars', 0) or 0) if owner_preview else 0
+        )
+    else:
+        client_stars = getattr(request.user, 'stars', 0) or 0
 
     try:
         quote = build_expedition_quote(
             parcels=parcels,
             mode=mode,
+            transport_mode=transport_mode,
             shipping_category=category,
             forwarder_delivery_fee=forwarder_fee,
+            forwarder_address=forwarder_address,
             volume_cbm_override=volume_override,
             weight_kg_override=weight_override,
+            client_stars=client_stars,
         )
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1109,18 +1323,23 @@ def _expedition_quote_or_create(request, *, create: bool):
     if not create:
         return Response(quote)
 
-    owner = _resolve_parcel_owner(parcels[0])
-    if owner is None:
-        return Response(
-            {"detail": "Impossible de déterminer le client du colis."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+    if admin:
+        owner = _resolve_parcel_owner(parcels[0])
+        if owner is None:
+            return Response(
+                {"detail": "Impossible de déterminer le client du colis."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        owner = request.user
 
     with transaction.atomic():
         exp = ExpeditionRequest.objects.create(
             user=owner,
             mode=quote['mode'],
+            transport_mode=quote.get('transport_mode'),
             shipping_category=quote.get('shipping_category'),
+            forwarder_address=quote.get('forwarder_address') or '',
             weight_kg=Decimal(str(quote['weight_kg'])),
             volume_cbm=Decimal(str(quote['volume_cbm'])),
             grouping_fee=Decimal(str(quote['grouping_fee'])),
@@ -1128,28 +1347,59 @@ def _expedition_quote_or_create(request, *, create: bool):
             forwarder_delivery_fee=Decimal(str(quote['forwarder_delivery_fee'])),
             cbm_fee=Decimal(str(quote['cbm_fee'])),
             cbm_fee_advance=Decimal(str(quote['cbm_fee_advance'])),
+            loyalty_discount_usd=Decimal(str(quote.get('loyalty_discount_usd') or 0)),
             total_due_now=Decimal(str(quote['total_due_now'])),
             was_grouped=quote['was_grouped'],
-            status='awaiting_payment',
+            status=quote.get('status') or 'awaiting_payment',
             created_by=request.user,
         )
         exp.parcels.set(parcels)
-        # Persister CBM saisi sur le(s) colis si fourni
-        if volume_override is not None and len(parcels) == 1:
+        if admin and volume_override is not None and len(parcels) == 1:
             parcels[0].volume_cbm = Decimal(str(quote['volume_cbm']))
             parcels[0].save(update_fields=['volume_cbm', 'last_updated'])
 
     try:
-        send_fcm_notification(
-            owner,
-            "Devis d'expédition prêt",
-            f"Montant à payer : ${quote['total_due_now']:.2f}. "
-            f"Réf. expédition #{exp.pk}.",
-            type="payment",
-            reference_id=exp.pk,
-            data={"type": "expedition", "expedition_id": str(exp.pk)},
-            translate=False,
-        )
+        if quote['mode'] == 'other_forwarder':
+            notify_admins(
+                "Transfert vers un autre transitaire",
+                f"{owner.email} demande le transfert du/des colis "
+                f"{', '.join(quote.get('tracking_numbers') or [])} "
+                f"vers : {quote.get('forwarder_address') or '—'}. "
+                f"Réf. #{exp.pk} — indiquez les frais de transfert.",
+                type="expedition",
+                reference_id=exp.pk,
+                data={"type": "expedition", "expedition_id": str(exp.pk)},
+            )
+            send_fcm_notification(
+                owner,
+                "Demande envoyée",
+                "Votre demande de transfert vers un autre transitaire a été "
+                "transmise. Vous recevrez les frais de transfert à payer.",
+                type="expedition",
+                reference_id=exp.pk,
+                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                translate=False,
+            )
+        elif admin:
+            send_fcm_notification(
+                owner,
+                "Expédition à payer",
+                f"Montant à payer : ${quote['total_due_now']:.2f}. "
+                f"Réf. expédition #{exp.pk}.",
+                type="payment",
+                reference_id=exp.pk,
+                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                translate=False,
+            )
+        else:
+            notify_admins(
+                "Expédition Bujito",
+                f"{owner.email} a choisi l'expédition #{exp.pk} "
+                f"({quote.get('transport_mode')}, ${quote['total_due_now']:.2f}).",
+                type="expedition",
+                reference_id=exp.pk,
+                data={"type": "expedition", "expedition_id": str(exp.pk)},
+            )
     except Exception:
         pass
 
@@ -1160,7 +1410,7 @@ def _expedition_quote_or_create(request, *, create: bool):
 
 
 class ExpeditionQuoteView(APIView):
-    permission_classes = [IsAuthenticated, IsAdminUser]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         return _expedition_quote_or_create(request, create=False)
@@ -1179,8 +1429,6 @@ class ExpeditionListCreateView(APIView):
         return Response(ExpeditionRequestSerializer(qs, many=True).data)
 
     def post(self, request):
-        if not is_app_admin(request.user):
-            return Response({"detail": "Accès refusé."}, status=status.HTTP_403_FORBIDDEN)
         return _expedition_quote_or_create(request, create=True)
 
 
@@ -1200,6 +1448,127 @@ class ExpeditionDetailView(APIView):
         exp = self.get_object(pk, request.user)
         if exp is None:
             return Response({"detail": "Introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ExpeditionRequestSerializer(exp).data)
+
+    def patch(self, request, pk):
+        """Admin : frais de transfert OU confirmation d'envoi (n° tracking)."""
+        from decimal import Decimal, InvalidOperation
+        from django.utils import timezone
+
+        if not is_app_admin(request.user):
+            return Response({"detail": "Accès refusé."}, status=status.HTTP_403_FORBIDDEN)
+        exp = self.get_object(pk, request.user)
+        if exp is None:
+            return Response({"detail": "Introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        if exp.mode != 'other_forwarder':
+            return Response(
+                {"detail": "Seules les demandes « autre transitaire » acceptent ce PATCH."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if exp.status in ('shipped', 'cancelled'):
+            return Response(
+                {"detail": "Cette demande ne peut plus être modifiée."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Confirmation d'envoi vers le transitaire (après paiement).
+        outbound = request.data.get('outbound_tracking_number')
+        if outbound is not None:
+            if exp.status != 'paid':
+                return Response(
+                    {
+                        "detail": (
+                            "La demande doit être payée avant de confirmer "
+                            "l'envoi avec un n° de tracking."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            tracking = str(outbound).strip()
+            if len(tracking) < 4:
+                return Response(
+                    {"detail": "Indiquez un numéro de tracking valide."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            with transaction.atomic():
+                exp.outbound_tracking_number = tracking
+                exp.status = 'shipped'
+                exp.shipped_at = timezone.now()
+                exp.save(
+                    update_fields=[
+                        'outbound_tracking_number',
+                        'status',
+                        'shipped_at',
+                    ]
+                )
+                addr = (exp.forwarder_address or '').strip()
+                for parcel in exp.parcels.select_for_update():
+                    parcel.status = 'in_transit'
+                    if addr:
+                        parcel.current_location = addr[:255]
+                    parcel.save(
+                        update_fields=['status', 'current_location', 'last_updated']
+                    )
+            try:
+                send_fcm_notification(
+                    exp.user,
+                    "Colis envoyé vers votre transitaire",
+                    f"N° de suivi : {tracking}. Réf. expédition #{exp.pk}.",
+                    type="expedition",
+                    reference_id=exp.pk,
+                    data={
+                        "type": "expedition",
+                        "expedition_id": str(exp.pk),
+                        "outbound_tracking_number": tracking,
+                    },
+                    translate=False,
+                )
+            except Exception:
+                pass
+            return Response(ExpeditionRequestSerializer(exp).data)
+
+        # Fixer les frais de transfert → paiement client.
+        if exp.status == 'paid':
+            return Response(
+                {"detail": "Cette demande est déjà payée."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        raw = request.data.get('forwarder_delivery_fee')
+        try:
+            fee = Decimal(str(raw).replace(',', '.'))
+        except (InvalidOperation, TypeError, ValueError):
+            return Response(
+                {"detail": "forwarder_delivery_fee invalide."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if fee <= 0:
+            return Response(
+                {"detail": "Les frais de transfert doivent être > 0."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        exp.forwarder_delivery_fee = fee.quantize(Decimal('0.01'))
+        exp.total_due_now = exp.forwarder_delivery_fee
+        exp.status = 'awaiting_payment'
+        exp.save(
+            update_fields=[
+                'forwarder_delivery_fee',
+                'total_due_now',
+                'status',
+            ]
+        )
+        try:
+            send_fcm_notification(
+                exp.user,
+                "Frais de transfert à payer",
+                f"Montant : ${float(exp.total_due_now):.2f}. "
+                f"Réf. expédition #{exp.pk}.",
+                type="payment",
+                reference_id=exp.pk,
+                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                translate=False,
+            )
+        except Exception:
+            pass
         return Response(ExpeditionRequestSerializer(exp).data)
 
 

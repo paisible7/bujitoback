@@ -379,11 +379,15 @@ class ShipmentBatch(models.Model):
 
 
 class ExpeditionRequest(models.Model):
-    """Devis d'expédition (Bujito Digital ou autre transitaire) à payer par le client."""
+    """Demande d'expédition (Bujito Digital ou autre transitaire)."""
 
     MODE_CHOICES = [
         ('bujito_digital', _('Expédier par Bujito Digital')),
         ('other_forwarder', _('Expédier par un autre transitaire')),
+    ]
+    TRANSPORT_CHOICES = [
+        ('air', _('Par avion')),
+        ('sea', _('Par bateau')),
     ]
     CATEGORY_CHOICES = [
         ('ordinary', _('Colis ordinaire')),
@@ -391,9 +395,10 @@ class ExpeditionRequest(models.Model):
         ('phone', _('Téléphone')),
     ]
     STATUS_CHOICES = [
-        ('quoted', _('Devis')),
+        ('quoted', _('En attente frais transfert')),
         ('awaiting_payment', _('En attente de paiement')),
         ('paid', _('Payé')),
+        ('shipped', _('Envoyé vers transitaire')),
         ('cancelled', _('Annulé')),
     ]
 
@@ -409,12 +414,30 @@ class ExpeditionRequest(models.Model):
         verbose_name=_("Colis"),
     )
     mode = models.CharField(max_length=30, choices=MODE_CHOICES, verbose_name=_("Mode"))
+    transport_mode = models.CharField(
+        max_length=10,
+        choices=TRANSPORT_CHOICES,
+        blank=True,
+        null=True,
+        verbose_name=_("Transport (avion / bateau)"),
+    )
     shipping_category = models.CharField(
         max_length=20,
         choices=CATEGORY_CHOICES,
         blank=True,
         null=True,
-        verbose_name=_("Catégorie d'expédition"),
+        verbose_name=_("Catégorie d'expédition (avion)"),
+    )
+    forwarder_address = models.TextField(
+        blank=True,
+        default='',
+        verbose_name=_("Adresse autre transitaire"),
+    )
+    outbound_tracking_number = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        verbose_name=_("N° suivi envoi vers transitaire"),
     )
     weight_kg = models.DecimalField(
         max_digits=10,
@@ -444,7 +467,7 @@ class ExpeditionRequest(models.Model):
         max_digits=10,
         decimal_places=2,
         default=0,
-        verbose_name=_("Frais livraison autre transitaire (USD)"),
+        verbose_name=_("Frais transfert autre transitaire (USD)"),
     )
     cbm_fee = models.DecimalField(
         max_digits=10,
@@ -457,6 +480,13 @@ class ExpeditionRequest(models.Model):
         decimal_places=2,
         default=0,
         verbose_name=_("Acompte CBM 50% (USD)"),
+    )
+    loyalty_discount_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        verbose_name=_("Réduction fidélité aérienne (USD)"),
+        help_text=_("50 % sur le tarif avion pour clients 5★."),
     )
     total_due_now = models.DecimalField(
         max_digits=10,
@@ -481,6 +511,7 @@ class ExpeditionRequest(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Créé le"))
     paid_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Payé le"))
+    shipped_at = models.DateTimeField(null=True, blank=True, verbose_name=_("Envoyé le"))
 
     class Meta:
         ordering = ['-created_at']

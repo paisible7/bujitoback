@@ -123,8 +123,8 @@ class BusinessSettings(models.Model):
     cbm_rate_usd = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        default=Decimal("350.00"),
-        verbose_name=_("CBM — $/m³"),
+        default=Decimal("500.00"),
+        verbose_name=_("Par bateau (CBM) — $/m³"),
     )
 
     # --- QR paiements Chine (transferts agents / Alipay / fournisseurs) ---

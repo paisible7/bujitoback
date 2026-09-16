@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage, ShipmentBatch, ExpeditionRequest
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
+from .ownership import user_owns_parcel
 from .quote_utils import (
     parse_product_items,
     dump_product_items,
@@ -22,6 +23,11 @@ class ParcelSerializer(serializers.ModelSerializer):
     group_id = serializers.SerializerMethodField()
     mco_code = serializers.SerializerMethodField()
     pending_expedition_id = serializers.SerializerMethodField()
+    pending_expedition_status = serializers.SerializerMethodField()
+    pending_expedition_mode = serializers.SerializerMethodField()
+    pending_expedition_forwarder_address = serializers.SerializerMethodField()
+    pending_expedition_outbound_tracking = serializers.SerializerMethodField()
+    forwarder_outbound_tracking = serializers.SerializerMethodField()
 
     class Meta:
         model = Parcel
@@ -34,8 +40,22 @@ class ParcelSerializer(serializers.ModelSerializer):
             'image', 'package_photo', 'package_photos', 'last_updated', 'order',
             'user_email', 'was_grouped', 'group_id', 'mco_code',
             'pending_expedition_id',
+            'pending_expedition_status',
+            'pending_expedition_mode',
+            'pending_expedition_forwarder_address',
+            'pending_expedition_outbound_tracking',
+            'forwarder_outbound_tracking',
         ]
-        read_only_fields = ('last_updated', 'mco_code', 'pending_expedition_id')
+        read_only_fields = (
+            'last_updated',
+            'mco_code',
+            'pending_expedition_id',
+            'pending_expedition_status',
+            'pending_expedition_mode',
+            'pending_expedition_forwarder_address',
+            'pending_expedition_outbound_tracking',
+            'forwarder_outbound_tracking',
+        )
 
     def get_was_grouped(self, obj):
         return obj.consolidations.filter(status='completed').exists()
@@ -51,13 +71,85 @@ class ParcelSerializer(serializers.ModelSerializer):
         batches.sort(key=lambda b: b.created_at or b.pk, reverse=True)
         return batches[0].code
 
+    def _pending_expedition(self, obj):
+        cache = getattr(self, '_pending_exp_cache', None)
+        if cache is None:
+            cache = {}
+            self._pending_exp_cache = cache
+        if obj.pk in cache:
+            return cache[obj.pk]
+        exp = None
+        try:
+            manager = getattr(obj, 'expeditions', None)
+            if manager is not None:
+                # Actives : devis / paiement, ou autre transitaire payé en attente d'envoi.
+                candidates = list(
+                    manager.filter(
+                        status__in=['quoted', 'awaiting_payment', 'paid']
+                    ).order_by('-created_at')[:5]
+                )
+                for item in candidates:
+                    if item.status in ('quoted', 'awaiting_payment'):
+                        exp = item
+                        break
+                    if (
+                        item.status == 'paid'
+                        and item.mode == 'other_forwarder'
+                        and not (item.outbound_tracking_number or '').strip()
+                    ):
+                        exp = item
+                        break
+        except Exception:
+            exp = None
+        cache[obj.pk] = exp
+        return exp
+
     def get_pending_expedition_id(self, obj):
-        exp = (
-            obj.expeditions.filter(status='awaiting_payment')
-            .order_by('-created_at')
-            .first()
-        )
+        exp = self._pending_expedition(obj)
         return exp.pk if exp else None
+
+    def get_pending_expedition_status(self, obj):
+        exp = self._pending_expedition(obj)
+        return exp.status if exp else None
+
+    def get_pending_expedition_mode(self, obj):
+        exp = self._pending_expedition(obj)
+        return exp.mode if exp else None
+
+    def get_pending_expedition_forwarder_address(self, obj):
+        exp = self._pending_expedition(obj)
+        if not exp:
+            return None
+        addr = (exp.forwarder_address or '').strip()
+        return addr or None
+
+    def get_pending_expedition_outbound_tracking(self, obj):
+        exp = self._pending_expedition(obj)
+        if not exp:
+            return None
+        tn = (exp.outbound_tracking_number or '').strip()
+        return tn or None
+
+    def get_forwarder_outbound_tracking(self, obj):
+        """Dernier n° de tracking d'envoi vers un autre transitaire (confirmé)."""
+        try:
+            manager = getattr(obj, 'expeditions', None)
+            if manager is None:
+                return None
+            exp = (
+                manager.filter(
+                    mode='other_forwarder',
+                    status='shipped',
+                )
+                .exclude(outbound_tracking_number='')
+                .order_by('-shipped_at', '-created_at')
+                .first()
+            )
+            if not exp:
+                return None
+            return (exp.outbound_tracking_number or '').strip() or None
+        except Exception:
+            return None
 
     def get_image(self, obj):
         urls = self._all_image_urls(obj)
@@ -151,12 +243,14 @@ class ExpeditionRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExpeditionRequest
         fields = [
-            'id', 'mode', 'shipping_category', 'status',
+            'id', 'mode', 'transport_mode', 'shipping_category', 'status',
+            'forwarder_address', 'outbound_tracking_number',
             'weight_kg', 'volume_cbm', 'was_grouped',
             'grouping_fee', 'shipping_fee', 'forwarder_delivery_fee',
             'cbm_fee', 'cbm_fee_advance', 'cbm_fee_remaining', 'total_due_now',
+            'loyalty_discount_usd',
             'tracking_numbers', 'parcel_ids',
-            'created_at', 'paid_at', 'user',
+            'created_at', 'paid_at', 'shipped_at', 'user',
         ]
         read_only_fields = fields
 
@@ -710,7 +804,7 @@ class ConsolidationClientUpdateSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {"tracking_numbers": f"Le colis {tn} n'existe pas."}
                 )
-            if not parcel.order or parcel.order.user_id != user.id:
+            if not user_owns_parcel(user, parcel):
                 raise serializers.ValidationError(
                     {
                         "tracking_numbers": (
