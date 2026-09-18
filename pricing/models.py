@@ -103,6 +103,12 @@ class BusinessSettings(models.Model):
         default=Decimal("600.0000"),
         verbose_name=_("1 USD → FCFA"),
     )
+    usd_to_cny = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("6.3000"),
+        verbose_name=_("1 USD → CNY (yuan)"),
+    )
 
     # --- Adresse entrepôt Chine (globale, affiché sur tous les profils clients) ---
     china_warehouse_phone = models.CharField(

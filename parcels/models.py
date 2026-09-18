@@ -485,8 +485,8 @@ class ExpeditionRequest(models.Model):
         max_digits=10,
         decimal_places=2,
         default=0,
-        verbose_name=_("Réduction fidélité aérienne (USD)"),
-        help_text=_("50 % sur le tarif avion pour clients 5★."),
+        verbose_name=_("Réduction / reste aérien 5★ (USD)"),
+        help_text=_("Reste à payer plus tard : 50 % à l'avance pour clients 5★ (avion)."),
     )
     total_due_now = models.DecimalField(
         max_digits=10,

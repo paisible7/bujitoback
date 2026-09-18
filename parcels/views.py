@@ -297,6 +297,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         from decimal import Decimal, InvalidOperation
 
         from .weight_utils import parse_weight_kg, parse_china_date
+        from .tracking_utils import generate_tracking_number
 
         if not is_app_admin(request.user):
             return Response(
@@ -305,16 +306,30 @@ class ParcelListCreateView(generics.ListCreateAPIView):
             )
 
         data = request.data
-        tracking = str(data.get('tracking_number') or '').strip()
-        supplier_tracking = str(data.get('supplier_tracking_number') or '').strip()
+
+        def _text(key, default=''):
+            raw = data.get(key, default)
+            if raw is None:
+                return default
+            if isinstance(raw, (list, tuple)):
+                raw = raw[0] if raw else default
+            return str(raw).strip()
+
+        tracking = _text('tracking_number')
+        supplier_tracking = _text('supplier_tracking_number')
+        user_email = _text('user_email')
+        client_phone = _text('client_phone')
+        # Tracking Bujito auto : BUJ + 4 derniers chiffres du téléphone client.
+        if client_phone:
+            tracking = generate_tracking_number(client_phone=client_phone)
+        elif not tracking:
+            tracking = generate_tracking_number()
         if not tracking and not supplier_tracking:
             return Response(
                 {"detail": "tracking_number ou supplier_tracking_number requis."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user_email = (data.get('user_email') or '').strip()
-        client_phone = (data.get('client_phone') or '').strip()
         user = None
         if user_email:
             user = CustomUser.objects.filter(email__iexact=user_email).first()
@@ -325,6 +340,8 @@ class ParcelListCreateView(generics.ListCreateAPIView):
             ).first()
 
         order_id = data.get('order') or data.get('order_id')
+        if isinstance(order_id, str) and not order_id.strip():
+            order_id = None
         order_sequence = data.get('order_sequence')
         try:
             order_sequence = int(order_sequence) if order_sequence not in (None, '') else None
@@ -343,7 +360,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
                 .first()
             )
 
-        weight_volume = data.get('weight_volume')
+        weight_volume = _text('weight_volume') or None
         weight_kg = parse_weight_kg(
             data.get('weight_kg')
             if data.get('weight_kg') not in (None, '')
@@ -357,7 +374,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
             except (InvalidOperation, TypeError, ValueError):
                 volume_cbm = None
 
-        status_val = (data.get('status') or 'pending').strip().lower()
+        status_val = (_text('status') or 'pending').lower()
         allowed = {c[0] for c in Parcel.PARCEL_STATUS_CHOICES}
         if status_val not in allowed:
             status_val = 'pending'
@@ -390,12 +407,12 @@ class ParcelListCreateView(generics.ListCreateAPIView):
             order=order,
             order_sequence=order_sequence,
             status=status_val,
-            current_location=(data.get('current_location') or '').strip() or None,
-            description=(data.get('description') or '').strip() or None,
-            client_name=(data.get('client_name') or '').strip() or None,
+            current_location=_text('current_location') or None,
+            description=_text('description') or None,
+            client_name=_text('client_name') or None,
             client_phone=client_phone or None,
-            weight_volume=weight_volume or None,
-            warehouse_number=(data.get('warehouse_number') or '').strip() or None,
+            weight_volume=weight_volume,
+            warehouse_number=_text('warehouse_number') or None,
             china_arrival_date=china_date,
         )
         if weight_kg is not None:
@@ -423,7 +440,25 @@ class ParcelListCreateView(generics.ListCreateAPIView):
                 except Exception:
                     pass
 
-        parcel.save()
+        try:
+            parcel.save()
+        except Exception as exc:
+            from django.db import IntegrityError
+
+            if isinstance(exc, IntegrityError):
+                return Response(
+                    {
+                        "detail": (
+                            "Impossible d'enregistrer : numéro de suivi "
+                            "ou séquence déjà utilisés."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            return Response(
+                {"detail": f"Erreur d'enregistrement : {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return Response(
             ParcelSerializer(parcel, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
@@ -1547,7 +1582,10 @@ class ExpeditionDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         exp.forwarder_delivery_fee = fee.quantize(Decimal('0.01'))
-        exp.total_due_now = exp.forwarder_delivery_fee
+        grouping = exp.grouping_fee or Decimal('0.00')
+        exp.total_due_now = (grouping + exp.forwarder_delivery_fee).quantize(
+            Decimal('0.01')
+        )
         exp.status = 'awaiting_payment'
         exp.save(
             update_fields=[
@@ -1559,8 +1597,10 @@ class ExpeditionDetailView(APIView):
         try:
             send_fcm_notification(
                 exp.user,
-                "Frais de transfert à payer",
-                f"Montant : ${float(exp.total_due_now):.2f}. "
+                "Frais de groupage + transfert à payer",
+                f"Montant : ${float(exp.total_due_now):.2f} "
+                f"(groupage ${float(grouping):.2f} + transfert "
+                f"${float(exp.forwarder_delivery_fee):.2f}). "
                 f"Réf. expédition #{exp.pk}.",
                 type="payment",
                 reference_id=exp.pk,

@@ -12,7 +12,7 @@ from .weight_utils import parse_weight_kg
 ZERO = Decimal("0.00")
 CBM_ADVANCE_RATIO = Decimal("0.50")
 AIR_LOYALTY_STARS = 5
-AIR_LOYALTY_DISCOUNT = Decimal("0.50")  # 50 % sur solutions aériennes
+AIR_LOYALTY_ADVANCE_RATIO = Decimal("0.50")  # 50 % payable à l'avance (clients 5★)
 
 
 def _to_decimal(value) -> Decimal:
@@ -103,7 +103,7 @@ def build_expedition_quote(
     Calcule le montant d'expédition à partir des tarifs et du colis.
 
     - Bujito + avion  → poids × tarif catégorie ($/kg)
-      (clients 5★ : −50 % sur le frais aérien)
+      (clients 5★ : 50 % payable à l'avance)
     - Bujito + bateau → volume × tarif CBM (acompte 50 %)
     - Autre transitaire → uniquement frais de transfert (fixis par l'admin)
     """
@@ -127,8 +127,22 @@ def build_expedition_quote(
     )
 
     was_grouped = any(parcel_is_grouped(p) for p in parcels)
+    # Si les colis viennent d'un même groupage terminé, utiliser son poids réel.
+    if weight_kg_override is None and was_grouped:
+        cons = (
+            parcels[0]
+            .consolidations.filter(status="completed", weight_kg__isnull=False)
+            .order_by("-request_date")
+            .first()
+        )
+        if cons is not None:
+            cons_ids = set(cons.parcels.values_list("id", flat=True))
+            req_ids = {p.pk for p in parcels}
+            if req_ids and req_ids.issubset(cons_ids):
+                weight = _to_decimal(cons.weight_kg)
+
     grouping_fee = ZERO
-    if was_grouped and mode == "bujito_digital":
+    if was_grouped:
         for p in parcels:
             fee = parcel_grouping_fee(p)
             if fee is not None:
@@ -140,8 +154,9 @@ def build_expedition_quote(
             )
 
     shipping_fee = ZERO
-    shipping_fee_before_discount = ZERO
-    loyalty_discount_usd = ZERO
+    shipping_fee_full = ZERO
+    air_advance = ZERO
+    loyalty_discount_usd = ZERO  # reste à payer plus tard (avion 5★)
     loyalty_air_discount_applied = False
     cbm_fee = ZERO
     cbm_advance = ZERO
@@ -164,14 +179,14 @@ def build_expedition_quote(
             ship = shipping_cost(category=category, weight_kg=weight, settings=cfg)
             if not ship.get("available", True):
                 raise ValueError(ship.get("message") or "catégorie indisponible")
-            shipping_fee_before_discount = _to_decimal(ship["amount_usd"])
-            shipping_fee = shipping_fee_before_discount
-            if stars >= AIR_LOYALTY_STARS and shipping_fee > 0:
-                loyalty_discount_usd = (
-                    shipping_fee * AIR_LOYALTY_DISCOUNT
+            shipping_fee_full = _to_decimal(ship["amount_usd"])
+            shipping_fee = shipping_fee_full
+            if stars >= AIR_LOYALTY_STARS and shipping_fee_full > 0:
+                air_advance = (
+                    shipping_fee_full * AIR_LOYALTY_ADVANCE_RATIO
                 ).quantize(Decimal("0.01"))
-                shipping_fee = (
-                    shipping_fee - loyalty_discount_usd
+                loyalty_discount_usd = (
+                    shipping_fee_full - air_advance
                 ).quantize(Decimal("0.01"))
                 loyalty_air_discount_applied = True
         else:
@@ -183,23 +198,25 @@ def build_expedition_quote(
             cbm_fee = _to_decimal(cbm["amount_usd"])
             cbm_advance = _to_decimal(cbm["advance_usd"])
 
+        air_due_now = air_advance if loyalty_air_discount_applied else shipping_fee
         total_due_now = (
-            (grouping_fee if was_grouped else ZERO) + shipping_fee + cbm_advance
+            grouping_fee + air_due_now + cbm_advance
         ).quantize(Decimal("0.01"))
         status = "awaiting_payment"
         forwarder_fee = ZERO
 
     else:
-        # Autre transitaire : adresse obligatoire, frais de transfert seuls.
+        # Autre transitaire : frais de groupage (si groupé) + frais de transfert (admin).
         if not address:
             raise ValueError("Indiquez l'adresse du transitaire.")
         forwarder_fee = _to_decimal(forwarder_delivery_fee)
         if forwarder_fee < 0:
             raise ValueError("forwarder_delivery_fee invalide")
         if forwarder_fee > 0:
-            total_due_now = forwarder_fee.quantize(Decimal("0.01"))
+            total_due_now = (grouping_fee + forwarder_fee).quantize(Decimal("0.01"))
             status = "awaiting_payment"
         else:
+            # Demande client : en attente que l'admin fixe les frais de transfert.
             total_due_now = ZERO
             status = "quoted"
 
@@ -211,16 +228,15 @@ def build_expedition_quote(
         "was_grouped": was_grouped,
         "weight_kg": float(weight),
         "volume_cbm": float(volume),
-        "grouping_fee": float(grouping_fee if was_grouped and mode == "bujito_digital" else ZERO),
+        "grouping_fee": float(grouping_fee if was_grouped else ZERO),
         "shipping_fee": float(shipping_fee),
         "shipping_fee_before_discount": float(
-            shipping_fee_before_discount
-            if shipping_fee_before_discount > 0
-            else shipping_fee
+            shipping_fee_full if shipping_fee_full > 0 else shipping_fee
         ),
+        "loyalty_air_advance": float(air_advance),
         "loyalty_discount_usd": float(loyalty_discount_usd),
         "loyalty_air_discount_applied": loyalty_air_discount_applied,
-        "loyalty_air_discount_pct": float(AIR_LOYALTY_DISCOUNT * 100)
+        "loyalty_air_discount_pct": float(AIR_LOYALTY_ADVANCE_RATIO * 100)
         if loyalty_air_discount_applied
         else 0.0,
         "client_stars": stars,

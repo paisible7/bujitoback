@@ -29,6 +29,7 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "usd_to_cdf",
             "usd_to_gbp",
             "usd_to_xof",
+            "usd_to_cny",
             "china_warehouse_phone",
             "china_warehouse_street",
             "alipay_qr_url",

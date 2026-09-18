@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import secrets
 from dataclasses import dataclass
 
 from django.db import transaction
@@ -9,6 +8,7 @@ from notifications.utils import notify_admins, send_fcm_notification
 
 from .models import Order, Parcel
 from .order_status import sync_order_status
+from .tracking_utils import generate_tracking_number
 
 
 @dataclass(frozen=True)
@@ -18,13 +18,7 @@ class ProvisioningResult:
 
 
 def _generate_tracking_number(order_id: int, sequence: int) -> str:
-    prefix = f"BUJ-{order_id:06d}-{sequence:02d}"
-    for _ in range(10):
-        candidate = f"{prefix}-{secrets.token_hex(3).upper()}"
-        if not Parcel.objects.filter(tracking_number=candidate).exists():
-            return candidate
-    raise RuntimeError("Impossible de générer un numéro de suivi unique.")
-
+    return generate_tracking_number(order_id=order_id, sequence=sequence)
 
 def _notify_provisioning(
     *,
