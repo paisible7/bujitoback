@@ -17,8 +17,14 @@ class ProvisioningResult:
     created_count: int
 
 
-def _generate_tracking_number(order_id: int, sequence: int) -> str:
-    return generate_tracking_number(order_id=order_id, sequence=sequence)
+def _generate_tracking_number(order: Order, sequence: int) -> str:
+    """N° de suivi client : BUJ + 4 derniers chiffres du téléphone."""
+    phone = (order.client_phone or getattr(order.user, "phone_number", None) or "").strip()
+    return generate_tracking_number(
+        order_id=order.pk,
+        sequence=sequence,
+        client_phone=phone or None,
+    )
 
 def _notify_provisioning(
     *,
@@ -100,7 +106,7 @@ def provision_order_parcels(
                 parcel = Parcel.objects.create(
                     order=order,
                     order_sequence=sequence,
-                    tracking_number=_generate_tracking_number(order.pk, sequence),
+                    tracking_number=_generate_tracking_number(order, sequence),
                     status="awaiting_arrival",
                     current_location="En attente d'arrivée à l'entrepôt",
                     client_name=order.client_name or order.user.full_name or order.user.email,

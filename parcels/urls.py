@@ -15,6 +15,7 @@ from .views import (
     ShipmentBatchListCreateView,
     ShipmentBatchGenerateView,
     ShipmentBatchDetailView,
+    ShipmentBatchBulkStatusView,
     ConsolidationBulkStatusView,
     ExpeditionQuoteView,
     ExpeditionListCreateView,
@@ -46,6 +47,7 @@ urlpatterns = [
     # Lots MCO
     path('shipments/', ShipmentBatchListCreateView.as_view(), name='shipment-list-create'),
     path('shipments/generate/', ShipmentBatchGenerateView.as_view(), name='shipment-generate'),
+    path('shipments/bulk-status/', ShipmentBatchBulkStatusView.as_view(), name='shipment-bulk-status'),
     path('shipments/<int:pk>/', ShipmentBatchDetailView.as_view(), name='shipment-detail'),
 
     # URLs pour les colis (maintenant directement sous /api/parcels/ après inclusion)

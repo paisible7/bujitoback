@@ -1279,10 +1279,14 @@ def _expedition_quote_or_create(request, *, create: bool):
     weight_override = request.data.get('weight_kg')
     admin = is_app_admin(request.user)
 
-    # Seul l'admin peut forcer poids / CBM ; le client ne fixe pas les frais transfert.
+    # Seul l'admin peut forcer poids / CBM / catégorie sensible|phone.
+    # Le client peut seulement choisir Express (colis ordinaire accéléré).
     if not admin:
         volume_override = None
         weight_override = None
+        cat = (category or "").strip().lower()
+        if cat != "express":
+            category = None
         if mode == 'other_forwarder':
             forwarder_fee = None
 
@@ -1612,11 +1616,36 @@ class ExpeditionDetailView(APIView):
         return Response(ExpeditionRequestSerializer(exp).data)
 
 
+def _apply_shipment_batch_status(batch, new_status: str) -> list[str]:
+    """Applique un statut MCO et propage `in_transit` aux colis si expédié.
+
+    Retourne la liste des champs à sauvegarder sur le batch.
+    """
+    from django.utils import timezone
+    from .grouping import sync_completed_group_parcel_status
+
+    update_fields = ['status']
+    batch.status = new_status
+    if new_status == 'shipped':
+        batch.shipped_at = timezone.now()
+        update_fields.append('shipped_at')
+        for parcel in batch.parcels.all():
+            parcel.status = 'in_transit'
+            parcel.save(update_fields=['status', 'last_updated'])
+            sync_completed_group_parcel_status(parcel)
+    return update_fields
+
+
 class ShipmentBatchListCreateView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
         batches = ShipmentBatch.objects.prefetch_related('parcels').all()
+        status_filter = (request.query_params.get('status') or '').strip().lower()
+        if status_filter and status_filter != 'all':
+            valid = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
+            if status_filter in valid:
+                batches = batches.filter(status=status_filter)
         return Response(
             ShipmentBatchSerializer(batches, many=True, context={'request': request}).data
         )
@@ -1742,9 +1771,6 @@ class ShipmentBatchDetailView(APIView):
         )
 
     def patch(self, request, pk):
-        from django.utils import timezone
-        from .grouping import sync_completed_group_parcel_status
-
         batch = self.get_object(pk)
         if batch is None:
             return Response({"detail": "Introuvable."}, status=status.HTTP_404_NOT_FOUND)
@@ -1754,15 +1780,7 @@ class ShipmentBatchDetailView(APIView):
         if new_status:
             if new_status not in {c[0] for c in ShipmentBatch.STATUS_CHOICES}:
                 return Response({"detail": "Statut MCO invalide."}, status=status.HTTP_400_BAD_REQUEST)
-            batch.status = new_status
-            update_fields.append('status')
-            if new_status == 'shipped':
-                batch.shipped_at = timezone.now()
-                update_fields.append('shipped_at')
-                for parcel in batch.parcels.all():
-                    parcel.status = 'in_transit'
-                    parcel.save(update_fields=['status', 'last_updated'])
-                    sync_completed_group_parcel_status(parcel)
+            update_fields.extend(_apply_shipment_batch_status(batch, new_status))
 
         if 'notes' in request.data:
             batch.notes = request.data.get('notes') or ''
@@ -1782,4 +1800,53 @@ class ShipmentBatchDetailView(APIView):
         return Response(
             ShipmentBatchSerializer(batch, context={'request': request}).data
         )
+
+
+class ShipmentBatchBulkStatusView(APIView):
+    """Changer le statut de plusieurs lots MCO (admin)."""
+
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        ids = request.data.get('ids') or []
+        new_status = request.data.get('status')
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {"detail": "ids requis (liste non vide)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        valid = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
+        if new_status not in valid:
+            return Response(
+                {"detail": f"Statut MCO invalide. Valeurs: {sorted(valid)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updated = []
+        missing = []
+        with transaction.atomic():
+            for raw_id in ids:
+                try:
+                    pk = int(raw_id)
+                except (TypeError, ValueError):
+                    missing.append(raw_id)
+                    continue
+                batch = (
+                    ShipmentBatch.objects.prefetch_related('parcels')
+                    .filter(pk=pk)
+                    .first()
+                )
+                if batch is None:
+                    missing.append(pk)
+                    continue
+                fields = _apply_shipment_batch_status(batch, new_status)
+                batch.save(update_fields=list(dict.fromkeys(fields)))
+                updated.append(pk)
+
+        return Response({
+            "updated": updated,
+            "updated_count": len(updated),
+            "missing": missing,
+            "status": new_status,
+        }, status=status.HTTP_200_OK)
 

@@ -27,12 +27,14 @@ class PaymentSerializer(serializers.ModelSerializer):
     user_email = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
     proof_image_url = serializers.SerializerMethodField()
+    qr_image_url = serializers.SerializerMethodField()
     is_transfer = serializers.SerializerMethodField()
     is_expedition = serializers.SerializerMethodField()
     beneficiary_name = serializers.SerializerMethodField()
     beneficiary_phone = serializers.SerializerMethodField()
     note = serializers.SerializerMethodField()
     purpose = serializers.SerializerMethodField()
+    qr_provider = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
@@ -50,14 +52,23 @@ class PaymentSerializer(serializers.ModelSerializer):
             'user_email',
             'client_name',
             'proof_image_url',
+            'qr_image_url',
             'is_transfer',
             'is_expedition',
             'beneficiary_name',
             'beneficiary_phone',
             'note',
             'purpose',
+            'qr_provider',
         ]
-        read_only_fields = ['reference', 'status', 'created_at', 'proof_image_url']
+        read_only_fields = [
+            'reference',
+            'status',
+            'created_at',
+            'proof_image_url',
+            'qr_image_url',
+            'qr_provider',
+        ]
 
     def get_method(self, obj):
         # Flutter expects a string value like 'orange_money', not the FK id.
@@ -76,6 +87,16 @@ class PaymentSerializer(serializers.ModelSerializer):
             self.context.get('request'),
             label=f'Payment #{obj.pk} proof',
         )
+
+    def get_qr_image_url(self, obj):
+        return absolute_media_url(
+            obj.qr_image,
+            self.context.get('request'),
+            label=f'Payment #{obj.pk} qr',
+        )
+
+    def get_qr_provider(self, obj):
+        return (_payment_meta(obj).get('qr_provider') or '').strip() or None
 
     def get_is_transfer(self, obj):
         meta = _payment_meta(obj)

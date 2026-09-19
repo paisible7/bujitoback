@@ -170,7 +170,10 @@ def build_expedition_quote(
             raise ValueError("Choisissez le transport : avion ou bateau.")
         if transport == "air":
             category = (shipping_category or "ordinary").strip().lower()
-            if category not in {"ordinary", "sensitive", "phone"}:
+            # Express = tarif accéléré réservé aux colis ordinaires uniquement.
+            if category == "express":
+                pass
+            elif category not in {"ordinary", "sensitive", "phone"}:
                 category = "ordinary"
             if weight <= 0 and category != "phone":
                 raise ValueError(

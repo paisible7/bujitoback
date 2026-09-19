@@ -391,6 +391,7 @@ class ExpeditionRequest(models.Model):
     ]
     CATEGORY_CHOICES = [
         ('ordinary', _('Colis ordinaire')),
+        ('express', _('Express (colis ordinaire)')),
         ('sensitive', _('Colis sensibles')),
         ('phone', _('Téléphone')),
     ]

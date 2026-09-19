@@ -216,7 +216,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         is_transfer = transfer_type == "money_transfer"
         is_expedition = transfer_type == "expedition"
         proof_image = request.FILES.get("proof_image") if is_transfer else None
+        qr_image = request.FILES.get("qr_image") if is_transfer else None
         transfer_purpose = (request.data.get("purpose") or "").strip().lower() if is_transfer else ""
+        qr_provider = (request.data.get("qr_provider") or "").strip().lower() if is_transfer else ""
 
         if not method_code:
             return Response({"message": "method is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -285,6 +287,10 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 "currency": transfer_currency,
                 "purpose": transfer_purpose or "other",
             }
+            if qr_provider in ("alipay", "wechat"):
+                meta["qr_provider"] = qr_provider
+            if qr_image is not None:
+                meta["has_qr_image"] = True
         elif is_expedition:
             expedition_id = request.data.get("expedition_id")
             if not expedition_id:
@@ -448,6 +454,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     phone_number=phone_number or None,
                     provider_raw_response=meta,
                     proof_image=proof_image,
+                    qr_image=qr_image,
                 )
 
         ussd_code = None

@@ -85,6 +85,12 @@ class Payment(models.Model):
         null=True,
         verbose_name=_("Preuve (capture)"),
     )
+    qr_image = models.ImageField(
+        upload_to='payments/qr/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_("QR Alipay / WeChat"),
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Date de création"))
     updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Dernière mise à jour"))
 

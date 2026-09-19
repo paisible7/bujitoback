@@ -14,6 +14,23 @@ class PaymentAdmin(admin.ModelAdmin):
     list_filter = ('status', 'method', 'created_at')
     search_fields = ('reference', 'user__email', 'external_id')
     readonly_fields = ('reference', 'created_at', 'updated_at')
+    fields = (
+        'user',
+        'order',
+        'expedition',
+        'amount',
+        'currency',
+        'reference',
+        'method',
+        'status',
+        'payment_url',
+        'phone_number',
+        'proof_image',
+        'qr_image',
+        'provider_raw_response',
+        'created_at',
+        'updated_at',
+    )
     actions = ('mark_completed', 'mark_failed')
 
     def _is_transfer(self, payment):
