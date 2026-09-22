@@ -476,7 +476,13 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
     lookup_field = 'tracking_number' # Important pour matcher l'URL
 
     def get_object(self):
-        obj = super().get_object()
+        key = self.kwargs.get(self.lookup_field)
+        qs = self.filter_queryset(self.get_queryset())
+        obj = qs.filter(tracking_number=key).first()
+        if obj is None:
+            obj = qs.filter(supplier_tracking_number__iexact=key).first()
+        if obj is None:
+            raise Http404("Colis non trouvé.")
         if is_app_admin(self.request.user):
             return obj
         if user_owns_parcel(self.request.user, obj):
@@ -509,11 +515,14 @@ class ParcelTrackView(generics.RetrieveAPIView):
 
     def get_object(self):
         tracking_number = self.kwargs.get(self.lookup_field)
-        try:
-            parcel = Parcel.objects.get(tracking_number=tracking_number)
-            return parcel
-        except Parcel.DoesNotExist:
+        parcel = Parcel.objects.filter(tracking_number=tracking_number).first()
+        if parcel is None:
+            parcel = Parcel.objects.filter(
+                supplier_tracking_number__iexact=tracking_number
+            ).first()
+        if parcel is None:
             raise Http404("Colis non trouvé.")
+        return parcel
 
 class ParcelGroupView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1399,15 +1408,23 @@ def _expedition_quote_or_create(request, *, create: bool):
 
     try:
         if quote['mode'] == 'other_forwarder':
+            trackings = ', '.join(quote.get('tracking_numbers') or [])
+            first_tracking = (quote.get('tracking_numbers') or [''])[0]
             notify_admins(
                 "Transfert vers un autre transitaire",
                 f"{owner.email} demande le transfert du/des colis "
-                f"{', '.join(quote.get('tracking_numbers') or [])} "
+                f"{trackings} "
                 f"vers : {quote.get('forwarder_address') or '—'}. "
                 f"Réf. #{exp.pk} — indiquez les frais de transfert.",
                 type="expedition",
                 reference_id=exp.pk,
-                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                data={
+                    "type": "expedition",
+                    "expedition_id": str(exp.pk),
+                    "mode": "other_forwarder",
+                    "status": exp.status,
+                    "tracking_number": first_tracking or "",
+                },
             )
             send_fcm_notification(
                 owner,
@@ -1416,7 +1433,13 @@ def _expedition_quote_or_create(request, *, create: bool):
                 "transmise. Vous recevrez les frais de transfert à payer.",
                 type="expedition",
                 reference_id=exp.pk,
-                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                data={
+                    "type": "expedition",
+                    "expedition_id": str(exp.pk),
+                    "mode": "other_forwarder",
+                    "status": exp.status,
+                    "tracking_number": first_tracking or "",
+                },
                 translate=False,
             )
         elif admin:
@@ -1606,9 +1629,14 @@ class ExpeditionDetailView(APIView):
                 f"(groupage ${float(grouping):.2f} + transfert "
                 f"${float(exp.forwarder_delivery_fee):.2f}). "
                 f"Réf. expédition #{exp.pk}.",
-                type="payment",
+                type="expedition",
                 reference_id=exp.pk,
-                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                data={
+                    "type": "expedition",
+                    "expedition_id": str(exp.pk),
+                    "mode": exp.mode,
+                    "status": exp.status,
+                },
                 translate=False,
             )
         except Exception:
