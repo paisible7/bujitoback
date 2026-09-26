@@ -199,18 +199,20 @@ class ShipmentBatchSerializer(serializers.ModelSerializer):
     tracking_numbers = serializers.SerializerMethodField()
     admin_photo_url = serializers.SerializerMethodField()
     expedition_label = serializers.SerializerMethodField()
+    clients = serializers.SerializerMethodField()
 
     class Meta:
         model = ShipmentBatch
         fields = [
             'id', 'code', 'expedition_label', 'status',
             'total_weight_kg', 'total_volume_cbm', 'parcel_count',
-            'tracking_numbers', 'created_at', 'shipped_at', 'notes',
+            'tracking_numbers', 'clients', 'created_at', 'shipped_at', 'notes',
             'admin_description', 'admin_photo_url',
         ]
         read_only_fields = (
             'code', 'total_weight_kg', 'total_volume_cbm',
             'created_at', 'shipped_at', 'expedition_label', 'admin_photo_url',
+            'clients',
         )
 
     def get_parcel_count(self, obj):
@@ -233,6 +235,48 @@ class ShipmentBatchSerializer(serializers.ModelSerializer):
             if match:
                 return f"Expédition #{match.group(1)}"
         return f"Expédition #{obj.pk}"
+
+    def get_clients(self, obj):
+        """Clients uniques rattachés aux colis du lot MCO."""
+        seen = set()
+        clients = []
+        for parcel in obj.parcels.all():
+            name = (parcel.client_name or '').strip()
+            phone = (parcel.client_phone or '').strip()
+            email = ''
+            user_id = None
+            city = ''
+            order = getattr(parcel, 'order', None)
+            user = getattr(order, 'user', None) if order is not None else None
+            if user is not None:
+                user_id = user.pk
+                if not name:
+                    name = (getattr(user, 'full_name', None) or '').strip()
+                if not phone:
+                    phone = (getattr(user, 'phone_number', None) or '').strip()
+                email = (getattr(user, 'email', None) or '').strip()
+                city = (getattr(user, 'city', None) or '').strip()
+            if order is not None and not city:
+                city = (order.city or '').strip()
+            if not name and not phone and not email:
+                continue
+            key = (
+                user_id,
+                email.lower(),
+                name.lower(),
+                phone,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            clients.append({
+                'name': name,
+                'phone': phone,
+                'email': email,
+                'city': city,
+                'user_id': user_id,
+            })
+        return clients
 
 
 class ExpeditionRequestSerializer(serializers.ModelSerializer):

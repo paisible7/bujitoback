@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django.db import transaction # Pour les opérations atomiques
+from django.db.models import Prefetch
 from django.http import Http404
 from .models import Order, Parcel, Consolidation, OrderImage, ImportBatch, ShipmentBatch, ExpeditionRequest
 from .serializers import (
@@ -24,7 +25,11 @@ from .serializers import (
     ShipmentBatchSerializer,
     ExpeditionRequestSerializer,
 )
-from .expedition_utils import build_expedition_quote, parcel_volume_cbm
+from .expedition_utils import (
+    build_expedition_quote,
+    parcel_volume_cbm,
+    parcels_shipping_category,
+)
 from .ownership import parcels_for_user_q, user_owns_parcel
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
@@ -1288,14 +1293,14 @@ def _expedition_quote_or_create(request, *, create: bool):
     weight_override = request.data.get('weight_kg')
     admin = is_app_admin(request.user)
 
-    # Seul l'admin peut forcer poids / CBM / catégorie sensible|phone.
-    # Le client peut seulement choisir Express (colis ordinaire accéléré).
+    # Catégorie d'expédition : fixée à l'enregistrement admin du colis.
+    # Le client peut seulement demander Express si le colis est ordinaire.
+    requested_express = False
     if not admin:
         volume_override = None
         weight_override = None
-        cat = (category or "").strip().lower()
-        if cat != "express":
-            category = None
+        requested_express = (category or "").strip().lower() == "express"
+        category = None
         if mode == 'other_forwarder':
             forwarder_fee = None
 
@@ -1328,6 +1333,9 @@ def _expedition_quote_or_create(request, *, create: bool):
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
+        # Express client autorisé uniquement sur colis ordinaires.
+        if requested_express and parcels_shipping_category(parcels) == "ordinary":
+            category = "express"
 
     if create:
         busy = (
@@ -1664,11 +1672,20 @@ def _apply_shipment_batch_status(batch, new_status: str) -> list[str]:
     return update_fields
 
 
+def _shipment_batch_qs():
+    return ShipmentBatch.objects.prefetch_related(
+        Prefetch(
+            'parcels',
+            queryset=Parcel.objects.select_related('order__user'),
+        )
+    )
+
+
 class ShipmentBatchListCreateView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        batches = ShipmentBatch.objects.prefetch_related('parcels').all()
+        batches = _shipment_batch_qs().all()
         status_filter = (request.query_params.get('status') or '').strip().lower()
         if status_filter and status_filter != 'all':
             valid = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
@@ -1786,7 +1803,7 @@ class ShipmentBatchDetailView(APIView):
 
     def get_object(self, pk):
         try:
-            return ShipmentBatch.objects.prefetch_related('parcels').get(pk=pk)
+            return _shipment_batch_qs().get(pk=pk)
         except ShipmentBatch.DoesNotExist:
             return None
 
@@ -1859,11 +1876,7 @@ class ShipmentBatchBulkStatusView(APIView):
                 except (TypeError, ValueError):
                     missing.append(raw_id)
                     continue
-                batch = (
-                    ShipmentBatch.objects.prefetch_related('parcels')
-                    .filter(pk=pk)
-                    .first()
-                )
+                batch = _shipment_batch_qs().filter(pk=pk).first()
                 if batch is None:
                     missing.append(pk)
                     continue

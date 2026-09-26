@@ -86,6 +86,33 @@ def cbm_cost(*, volume_cbm, settings: BusinessSettings | None = None) -> dict[st
     }
 
 
+def parcel_shipping_category(parcel) -> str:
+    """Catégorie fixée à l'enregistrement admin (description du colis)."""
+    raw = (getattr(parcel, "description", None) or "").strip().lower()
+    if not raw:
+        return "ordinary"
+    if raw in {"ordinary", "sensitive", "phone", "express"}:
+        return raw
+    if any(k in raw for k in ("téléphone", "telephone", "phone")):
+        return "phone"
+    if any(k in raw for k in ("sensible", "sensitive")):
+        return "sensitive"
+    if "express" in raw:
+        return "express"
+    if any(k in raw for k in ("ordinaire", "ordinary")):
+        return "ordinary"
+    return "ordinary"
+
+
+def parcels_shipping_category(parcels: list) -> str:
+    """Priorité : phone > sensitive > express > ordinary."""
+    cats = {parcel_shipping_category(p) for p in parcels}
+    for key in ("phone", "sensitive", "express", "ordinary"):
+        if key in cats:
+            return key
+    return "ordinary"
+
+
 def build_expedition_quote(
     *,
     parcels: list,
@@ -106,6 +133,9 @@ def build_expedition_quote(
       (clients 5★ : 50 % payable à l'avance)
     - Bujito + bateau → volume × tarif CBM (acompte 50 %)
     - Autre transitaire → uniquement frais de transfert (fixis par l'admin)
+
+    La catégorie vient de l'enregistrement admin du colis (description),
+    pas d'un choix client à l'expédition.
     """
     cfg = settings or BusinessSettings.load()
     mode = (mode or "").strip().lower()
@@ -169,11 +199,13 @@ def build_expedition_quote(
         if transport not in {"air", "sea"}:
             raise ValueError("Choisissez le transport : avion ou bateau.")
         if transport == "air":
-            category = (shipping_category or "ordinary").strip().lower()
-            # Express = tarif accéléré réservé aux colis ordinaires uniquement.
-            if category == "express":
-                pass
-            elif category not in {"ordinary", "sensitive", "phone"}:
+            # Catégorie = enregistrement admin du colis (description).
+            category = parcels_shipping_category(parcels)
+            requested = (shipping_category or "").strip().lower()
+            # Admin peut encore forcer une catégorie via l'API si besoin.
+            if requested in {"ordinary", "sensitive", "phone", "express"}:
+                category = requested
+            if category not in {"ordinary", "sensitive", "phone", "express"}:
                 category = "ordinary"
             if weight <= 0 and category != "phone":
                 raise ValueError(

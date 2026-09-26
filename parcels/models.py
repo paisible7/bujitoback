@@ -116,7 +116,13 @@ class Parcel(models.Model):
         blank=True,
         verbose_name=_("Volume (CBM)"),
     )
-    warehouse_number = models.CharField(max_length=100, blank=True, null=True, verbose_name=_("N° Entrepôt"))
+    warehouse_number = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        verbose_name=_("Emplacement entrepôt"),
+        help_text=_("Emplacement physique dans l'entrepôt (ex. étagère 1)."),
+    )
     china_arrival_date = models.DateField(
         null=True,
         blank=True,
