@@ -237,7 +237,10 @@ class ShipmentBatchSerializer(serializers.ModelSerializer):
         return f"Expédition #{obj.pk}"
 
     def get_clients(self, obj):
-        """Clients uniques rattachés aux colis du lot MCO."""
+        """Clients uniques rattachés aux colis du lot MCO (nom + téléphone)."""
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
         seen = set()
         clients = []
         for parcel in obj.parcels.all():
@@ -248,6 +251,19 @@ class ShipmentBatchSerializer(serializers.ModelSerializer):
             city = ''
             order = getattr(parcel, 'order', None)
             user = getattr(order, 'user', None) if order is not None else None
+            if user is None:
+                cons = parcel.consolidations.order_by('-request_date').first()
+                if cons is not None and cons.user_id:
+                    user = cons.user
+            if user is None and phone:
+                digits = ''.join(ch for ch in phone if ch.isdigit())
+                if len(digits) >= 8:
+                    tail = digits[-9:] if len(digits) > 9 else digits
+                    user = (
+                        User.objects.filter(phone_number__icontains=tail)
+                        .order_by('id')
+                        .first()
+                    )
             if user is not None:
                 user_id = user.pk
                 if not name:
@@ -256,8 +272,13 @@ class ShipmentBatchSerializer(serializers.ModelSerializer):
                     phone = (getattr(user, 'phone_number', None) or '').strip()
                 email = (getattr(user, 'email', None) or '').strip()
                 city = (getattr(user, 'city', None) or '').strip()
-            if order is not None and not city:
-                city = (order.city or '').strip()
+            if order is not None:
+                if not city:
+                    city = (order.city or '').strip()
+                if not name:
+                    name = (order.client_name or '').strip()
+                if not phone:
+                    phone = (order.client_phone or '').strip()
             if not name and not phone and not email:
                 continue
             key = (

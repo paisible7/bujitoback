@@ -1307,13 +1307,15 @@ def _expedition_quote_or_create(request, *, create: bool):
     parcels = []
     if tracking_numbers:
         parcels = list(
-            Parcel.objects.select_related('order__user').filter(
-                tracking_number__in=tracking_numbers
-            )
+            Parcel.objects.select_related('order__user')
+            .prefetch_related('consolidations')
+            .filter(tracking_number__in=tracking_numbers)
         )
     elif parcel_ids:
         parcels = list(
-            Parcel.objects.select_related('order__user').filter(id__in=parcel_ids)
+            Parcel.objects.select_related('order__user')
+            .prefetch_related('consolidations')
+            .filter(id__in=parcel_ids)
         )
     if not parcels:
         return Response(
@@ -1338,15 +1340,32 @@ def _expedition_quote_or_create(request, *, create: bool):
             category = "express"
 
     if create:
-        busy = (
+        existing = (
             ExpeditionRequest.objects.filter(
                 parcels__in=parcels,
                 status__in=['quoted', 'awaiting_payment', 'paid'],
             )
             .distinct()
-            .exists()
+            .prefetch_related('parcels')
+            .order_by('-id')
+            .first()
         )
-        if busy:
+        if existing is not None:
+            # Idempotent : renvoyer la demande déjà ouverte du même client.
+            owner_for_existing = (
+                request.user
+                if not admin
+                else _resolve_parcel_owner(parcels[0])
+            )
+            same_owner = (
+                owner_for_existing is not None
+                and existing.user_id == owner_for_existing.id
+            )
+            if same_owner:
+                return Response(
+                    ExpeditionRequestSerializer(existing).data,
+                    status=status.HTTP_200_OK,
+                )
             return Response(
                 {"detail": "Une demande d'expédition est déjà active pour ces colis."},
                 status=status.HTTP_409_CONFLICT,
@@ -1676,7 +1695,11 @@ def _shipment_batch_qs():
     return ShipmentBatch.objects.prefetch_related(
         Prefetch(
             'parcels',
-            queryset=Parcel.objects.select_related('order__user'),
+            queryset=Parcel.objects.select_related(
+                'order__user',
+            ).prefetch_related(
+                'consolidations__user',
+            ),
         )
     )
 

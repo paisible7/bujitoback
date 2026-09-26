@@ -10,6 +10,7 @@ def user_owns_parcel(user, parcel) -> bool:
     """
     Un colis appartient au client si :
     - lié à une commande de ce user, OU
+    - lié à un groupage de ce user, OU
     - le téléphone client du colis correspond au téléphone du compte.
     """
     if user is None or not getattr(user, "is_authenticated", False):
@@ -17,6 +18,9 @@ def user_owns_parcel(user, parcel) -> bool:
     if parcel.order_id and getattr(parcel, "order", None) is not None:
         if parcel.order.user_id == user.id:
             return True
+    # Groupage : le client qui a demandé le groupage reste propriétaire.
+    if parcel.consolidations.filter(user_id=user.id).exists():
+        return True
     user_phone = _digits(getattr(user, "phone_number", None))
     parcel_phone = _digits(getattr(parcel, "client_phone", None))
     if user_phone and parcel_phone:
@@ -35,7 +39,7 @@ def parcels_for_user_q(user):
 
     from .models import Parcel  # noqa: F401 — typage doc
 
-    q = Q(order__user=user)
+    q = Q(order__user=user) | Q(consolidations__user=user)
     phone = _digits(getattr(user, "phone_number", None))
     if phone and len(phone) >= 8:
         # Match souple : le champ texte contient la séquence de chiffres
