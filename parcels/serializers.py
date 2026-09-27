@@ -1112,19 +1112,62 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
                 instance.grouping_fee = grouping_fee
 
             if uploaded_images:
+                from django.core.files.base import ContentFile
+                import uuid
+
                 instance.note_images.all().delete()
-                for uploaded in uploaded_images:
+                primary_name = None
+                for index, uploaded in enumerate(uploaded_images):
+                    raw_name = getattr(uploaded, 'name', '') or f'group_note_{index}.jpg'
+                    base = raw_name.split('/')[-1].split('\\')[-1]
+                    filename = f'{uuid.uuid4().hex[:8]}_{base}'
+                    if hasattr(uploaded, 'seek'):
+                        try:
+                            uploaded.seek(0)
+                        except Exception:
+                            pass
+                    content = uploaded.read()
+                    if not content:
+                        continue
+                    if index == 0:
+                        instance.admin_note_image.save(
+                            filename,
+                            ContentFile(content),
+                            save=False,
+                        )
+                        primary_name = instance.admin_note_image.name
                     ConsolidationNoteImage.objects.create(
                         consolidation=instance,
-                        image=uploaded,
+                        image=ContentFile(content, name=filename),
                     )
-                instance.admin_note_image = uploaded_images[0]
+                # Si le save ImageField n'a pas peuplé le nom, reprendre la 1re note.
+                if not primary_name:
+                    first = instance.note_images.order_by('id').first()
+                    if first is not None:
+                        instance.admin_note_image = first.image.name
             elif has_legacy_image:
+                from django.core.files.base import ContentFile
+
+                legacy_image = validated_data.get('admin_note_image')
                 instance.admin_note_image = legacy_image
                 if legacy_image is not None:
+                    if hasattr(legacy_image, 'seek'):
+                        try:
+                            legacy_image.seek(0)
+                        except Exception:
+                            pass
+                    raw_name = getattr(legacy_image, 'name', '') or 'group_note.jpg'
+                    filename = raw_name.split('/')[-1].split('\\')[-1]
+                    content = legacy_image.read()
+                    # Repositionner pour le champ principal.
+                    if hasattr(legacy_image, 'seek'):
+                        try:
+                            legacy_image.seek(0)
+                        except Exception:
+                            pass
                     ConsolidationNoteImage.objects.create(
                         consolidation=instance,
-                        image=legacy_image,
+                        image=ContentFile(content, name=filename),
                     )
 
             update_fields = set()

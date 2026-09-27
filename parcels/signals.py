@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 
@@ -7,6 +9,8 @@ from notifications.utils import notify_admins, send_fcm_notification
 
 from .models import Consolidation, Order, Parcel
 from .order_status import sync_order_status_by_id
+
+logger = logging.getLogger(__name__)
 
 
 @receiver(pre_save, sender=Parcel)
@@ -242,105 +246,144 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
     if created:
         return
 
-    user = instance.user
+    from django.db import transaction
 
-    if getattr(instance, "_client_edited", False):
-        parcel_count = instance.parcels.count()
-        note = (instance.client_note or "").strip()
-        admin_body = (
-            f"{user.email} a modifié le groupage #{instance.pk} "
-            f"({parcel_count} colis). Un nouveau devis poids/frais est requis."
-        )
-        if note:
-            admin_body = f"{admin_body} Description: {note}"
-        notify_admins(
-            "Groupage modifié",
-            admin_body,
-            type="consolidation",
-            reference_id=instance.pk,
-            data={
-                "type": "consolidation",
-                "reference_id": instance.pk,
-                "action": "quote",
-            },
-        )
-        send_fcm_notification(
-            user,
-            "Groupage mis a jour",
-            (
-                f"Votre groupage #{instance.pk} a ete mis a jour. "
-                "Un nouveau devis poids/frais vous sera propose."
-            ),
-            type="consolidation",
-            reference_id=instance.pk,
-            data={
-                "type": "consolidation",
-                "reference_id": instance.pk,
-                "action": "edited",
-            },
-        )
-        return
-
+    consolidation_id = instance.pk
+    user_id = instance.user_id
+    client_edited = bool(getattr(instance, "_client_edited", False))
     old_status = getattr(instance, "_old_status", None)
-    if old_status == instance.status:
-        return
+    new_status = instance.status
 
-    if instance.status == "completed":
-        note = (instance.admin_note or "").strip()
-        decisions = {
-            d.parcel_id: d.decision
-            for d in instance.parcel_decisions.all()
-        }
-        accepted = []
-        for p in instance.parcels.all():
-            if decisions.get(p.id, "accepted") == "rejected":
-                continue
-            accepted.append(p.tracking_number or str(p.pk))
-        tracking_list = ", ".join(accepted) if accepted else "—"
-        body = (
-            f"Votre groupage #{instance.pk} a ete accepte. "
-            f"Colis groups: {tracking_list}."
-        )
-        if note:
-            body = f"{body} Note: {note}"
-        send_fcm_notification(
-            user,
-            "Groupage accepte",
-            body,
-            type="consolidation",
-            reference_id=instance.pk,
-            image=instance.admin_note_image if instance.admin_note_image else None,
-            data={
-                "type": "consolidation",
-                "reference_id": instance.pk,
-                "status": "completed",
-                "admin_note": note,
-            },
-        )
-    elif instance.status == "cancelled":
-        note = (instance.admin_note or "").strip()
-        body = f"Votre demande de groupage #{instance.pk} a ete refusee."
-        if note:
-            body = f"{body} Note: {note}"
-        send_fcm_notification(
-            user,
-            "Groupage refuse",
-            body,
-            type="consolidation",
-            reference_id=instance.pk,
-            data={
-                "type": "consolidation",
-                "reference_id": instance.pk,
-                "status": "cancelled",
-                "admin_note": note,
-            },
-        )
-    elif instance.status == "processing":
-        send_fcm_notification(
-            user,
-            "Groupage en cours",
-            f"Votre groupage #{instance.pk} est en cours de preparation.",
-            type="consolidation",
-            reference_id=instance.pk,
-            data={"type": "consolidation", "reference_id": instance.pk, "status": "processing"},
-        )
+    def _notify():
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        try:
+            group = Consolidation.objects.prefetch_related(
+                'parcels', 'parcel_decisions'
+            ).get(pk=consolidation_id)
+            user = User.objects.get(pk=user_id)
+        except Exception:
+            logger.exception(
+                "consolidation notify: group/user introuvable id=%s",
+                consolidation_id,
+            )
+            return
+
+        if client_edited:
+            parcel_count = group.parcels.count()
+            note = (group.client_note or "").strip()
+            admin_body = (
+                f"{user.email} a modifié le groupage #{group.pk} "
+                f"({parcel_count} colis). Un nouveau devis poids/frais est requis."
+            )
+            if note:
+                admin_body = f"{admin_body} Description: {note}"
+            notify_admins(
+                "Groupage modifié",
+                admin_body,
+                type="consolidation",
+                reference_id=group.pk,
+                data={
+                    "type": "consolidation",
+                    "reference_id": group.pk,
+                    "action": "quote",
+                },
+            )
+            send_fcm_notification(
+                user,
+                "Groupage mis a jour",
+                (
+                    f"Votre groupage #{group.pk} a ete mis a jour. "
+                    "Un nouveau devis poids/frais vous sera propose."
+                ),
+                type="consolidation",
+                reference_id=group.pk,
+                data={
+                    "type": "consolidation",
+                    "reference_id": group.pk,
+                    "action": "edited",
+                },
+            )
+            return
+
+        if old_status == new_status:
+            return
+
+        if new_status == "completed":
+            note = (group.admin_note or "").strip()
+            decisions = {
+                d.parcel_id: d.decision
+                for d in group.parcel_decisions.all()
+            }
+            accepted = []
+            for p in group.parcels.all():
+                if decisions.get(p.id, "accepted") == "rejected":
+                    continue
+                accepted.append(p.tracking_number or str(p.pk))
+            tracking_list = ", ".join(accepted) if accepted else "—"
+            body = (
+                f"Votre groupage #{group.pk} a ete accepte. "
+                f"Colis groups: {tracking_list}."
+            )
+            if note:
+                body = f"{body} Note: {note}"
+            note_image = None
+            if group.admin_note_image:
+                note_image = group.admin_note_image
+            else:
+                first = group.note_images.order_by('id').first()
+                if first is not None:
+                    note_image = first.image
+            try:
+                send_fcm_notification(
+                    user,
+                    "Groupage accepte",
+                    body,
+                    type="consolidation",
+                    reference_id=group.pk,
+                    image=note_image if note_image else None,
+                    data={
+                        "type": "consolidation",
+                        "reference_id": group.pk,
+                        "status": "completed",
+                        "admin_note": note,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Échec notif acceptation groupage #%s", group.pk
+                )
+        elif new_status == "cancelled":
+            note = (group.admin_note or "").strip()
+            body = f"Votre demande de groupage #{group.pk} a ete refusee."
+            if note:
+                body = f"{body} Note: {note}"
+            send_fcm_notification(
+                user,
+                "Groupage refuse",
+                body,
+                type="consolidation",
+                reference_id=group.pk,
+                data={
+                    "type": "consolidation",
+                    "reference_id": group.pk,
+                    "status": "cancelled",
+                    "admin_note": note,
+                },
+            )
+        elif new_status == "processing":
+            send_fcm_notification(
+                user,
+                "Groupage en cours",
+                f"Votre groupage #{group.pk} est en cours de preparation.",
+                type="consolidation",
+                reference_id=group.pk,
+                data={
+                    "type": "consolidation",
+                    "reference_id": group.pk,
+                    "status": "processing",
+                },
+            )
+
+    transaction.on_commit(_notify)

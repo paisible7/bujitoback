@@ -53,8 +53,28 @@ def send_fcm_notification(
         )
 
         if image is not None:
-            notif.image = image
-            notif.save(update_fields=['image'])
+            # Copier le fichier (ne pas réutiliser le FieldFile source : casse souvent
+            # les uploads groupage / multipart encore ouverts).
+            try:
+                import os
+
+                src_name = getattr(image, 'name', None) or 'notification.jpg'
+                base = os.path.basename(str(src_name)) or 'notification.jpg'
+                if hasattr(image, 'open'):
+                    image.open('rb')
+                data = image.read()
+                if hasattr(image, 'seek'):
+                    try:
+                        image.seek(0)
+                    except Exception:
+                        pass
+                if data:
+                    notif.image.save(base, ContentFile(data), save=True)
+            except Exception:
+                logger.exception(
+                    "Impossible de joindre l'image à la notification %s",
+                    notif.pk,
+                )
         elif image_bytes:
             name = image_name or 'annonce.jpg'
             notif.image.save(name, ContentFile(image_bytes), save=True)
