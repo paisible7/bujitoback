@@ -87,14 +87,49 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
 
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, min_length=6)
     full_name = serializers.CharField(required=False, allow_blank=True, default='')
-    phone_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    phone_number = serializers.CharField(required=True, allow_blank=False)
     city = serializers.CharField(required=True, allow_blank=False, max_length=100)
 
     class Meta:
         model = User
         fields = ('email', 'password', 'full_name', 'phone_number', 'city')
+
+    def validate_email(self, value):
+        email = (value or '').strip().lower()
+        if not email:
+            raise serializers.ValidationError("L'email est obligatoire.")
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError('Un compte existe déjà avec cet email.')
+        return email
+
+    def validate_phone_number(self, value):
+        phone = (value or '').strip()
+        if not phone:
+            raise serializers.ValidationError('Le téléphone est obligatoire.')
+        digits = ''.join(ch for ch in phone if ch.isdigit())
+        if len(digits) < 8:
+            raise serializers.ValidationError('Numéro de téléphone invalide.')
+        # Unicité souple (même numéro avec/sans espaces ou préfixe).
+        qs = User.objects.exclude(phone_number__isnull=True).exclude(phone_number='')
+        for existing in qs.only('phone_number'):
+            existing_digits = ''.join(
+                ch for ch in (existing.phone_number or '') if ch.isdigit()
+            )
+            if not existing_digits:
+                continue
+            if existing_digits == digits:
+                raise serializers.ValidationError(
+                    'Un compte existe déjà avec ce numéro de téléphone.'
+                )
+            if (
+                existing_digits.endswith(digits) or digits.endswith(existing_digits)
+            ) and min(len(existing_digits), len(digits)) >= 8:
+                raise serializers.ValidationError(
+                    'Un compte existe déjà avec ce numéro de téléphone.'
+                )
+        return phone
 
     def validate_city(self, value):
         city = (value or '').strip()
@@ -103,14 +138,12 @@ class RegisterSerializer(serializers.ModelSerializer):
         return city
 
     def create(self, validated_data):
-        phone = validated_data.get('phone_number') or None
-        if phone is not None and str(phone).strip() == '':
-            phone = None
+        phone = (validated_data.get('phone_number') or '').strip() or None
         return User.objects.create_user(
             email=validated_data['email'],
             password=validated_data['password'],
             role=ROLE_CLIENT,
-            full_name=validated_data.get('full_name', ''),
+            full_name=(validated_data.get('full_name') or '').strip(),
             phone_number=phone,
             city=validated_data.get('city', ''),
         )
@@ -134,6 +167,29 @@ class AdminCreateUserSerializer(serializers.Serializer):
         if User.objects.filter(email__iexact=email).exists():
             raise serializers.ValidationError('Un compte existe déjà avec cet email.')
         return email
+
+    def validate_phone_number(self, value):
+        phone = (value or '').strip()
+        if not phone:
+            return ''
+        digits = ''.join(ch for ch in phone if ch.isdigit())
+        if len(digits) < 8:
+            raise serializers.ValidationError('Numéro de téléphone invalide.')
+        qs = User.objects.exclude(phone_number__isnull=True).exclude(phone_number='')
+        for existing in qs.only('phone_number'):
+            existing_digits = ''.join(
+                ch for ch in (existing.phone_number or '') if ch.isdigit()
+            )
+            if not existing_digits:
+                continue
+            if existing_digits == digits or (
+                (existing_digits.endswith(digits) or digits.endswith(existing_digits))
+                and min(len(existing_digits), len(digits)) >= 8
+            ):
+                raise serializers.ValidationError(
+                    'Un compte existe déjà avec ce numéro de téléphone.'
+                )
+        return phone
 
     def validate(self, attrs):
         role = normalize_role(attrs.get('role', ROLE_CLIENT))

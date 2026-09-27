@@ -1362,14 +1362,36 @@ def _expedition_quote_or_create(request, *, create: bool):
                 and existing.user_id == owner_for_existing.id
             )
             if same_owner:
+                # Même mode → renvoyer la demande existante.
+                if (existing.mode or '') == mode:
+                    return Response(
+                        ExpeditionRequestSerializer(existing).data,
+                        status=status.HTTP_200_OK,
+                    )
+                # Changement de mode (Bujito ↔ autre transitaire) avant paiement.
+                if existing.status in ('quoted', 'awaiting_payment'):
+                    existing.status = 'cancelled'
+                    existing.save(update_fields=['status'])
+                else:
+                    return Response(
+                        {
+                            "detail": (
+                                "Une demande d'expédition est déjà active "
+                                "pour ces colis."
+                            )
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+            else:
                 return Response(
-                    ExpeditionRequestSerializer(existing).data,
-                    status=status.HTTP_200_OK,
+                    {
+                        "detail": (
+                            "Une demande d'expédition est déjà active "
+                            "pour ces colis."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
                 )
-            return Response(
-                {"detail": "Une demande d'expédition est déjà active pour ces colis."},
-                status=status.HTTP_409_CONFLICT,
-            )
 
     # Étoiles du client (bénéficiaire) pour la réduction aérienne 5★.
     if admin:
@@ -1435,8 +1457,13 @@ def _expedition_quote_or_create(request, *, create: bool):
 
     try:
         if quote['mode'] == 'other_forwarder':
-            trackings = ', '.join(quote.get('tracking_numbers') or [])
-            first_tracking = (quote.get('tracking_numbers') or [''])[0]
+            trackings = ', '.join(
+                str(t) for t in (quote.get('tracking_numbers') or []) if t
+            )
+            first_tracking = next(
+                (str(t) for t in (quote.get('tracking_numbers') or []) if t),
+                '',
+            )
             notify_admins(
                 "Transfert vers un autre transitaire",
                 f"{owner.email} demande le transfert du/des colis "
@@ -1490,7 +1517,11 @@ def _expedition_quote_or_create(request, *, create: bool):
                 data={"type": "expedition", "expedition_id": str(exp.pk)},
             )
     except Exception:
-        pass
+        import logging
+        logging.getLogger(__name__).exception(
+            "Échec notification après création expédition #%s",
+            getattr(exp, 'pk', None),
+        )
 
     return Response(
         ExpeditionRequestSerializer(exp).data,

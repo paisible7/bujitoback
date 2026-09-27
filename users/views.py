@@ -35,25 +35,42 @@ class RegisterView(APIView):
 
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
-        if serializer.is_valid():
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
             user = serializer.save()
-            refresh = RefreshToken.for_user(user)
-            return Response({
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-                'email': user.email,
-                'role': normalize_role(user.role),
-                'full_name': user.full_name,
-                'phone_number': user.phone_number,
-                'city': getattr(user, 'city', '') or '',
-                'stars': getattr(user, 'stars', 0) or 0,
-                'china_warehouse_address': build_china_warehouse_address(
-                    user.full_name,
-                    user.phone_number,
-                    getattr(user, 'city', '') or '',
-                ),
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            # Contrainte unique DB (email / téléphone) → message clair.
+            from django.db import IntegrityError
+
+            if isinstance(exc, IntegrityError):
+                msg = str(exc).lower()
+                if 'phone' in msg:
+                    return Response(
+                        {'phone_number': ['Un compte existe déjà avec ce numéro.']},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                return Response(
+                    {'email': ['Un compte existe déjà avec cet email.']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            raise
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'email': user.email,
+            'role': normalize_role(user.role),
+            'full_name': user.full_name,
+            'phone_number': user.phone_number,
+            'city': getattr(user, 'city', '') or '',
+            'stars': getattr(user, 'stars', 0) or 0,
+            'china_warehouse_address': build_china_warehouse_address(
+                user.full_name,
+                user.phone_number,
+                getattr(user, 'city', '') or '',
+            ),
+        }, status=status.HTTP_201_CREATED)
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):

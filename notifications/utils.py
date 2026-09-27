@@ -126,22 +126,39 @@ def notify_admins(title, body, *, type="info", reference_id=None, data=None):
     """Envoie une notification à tous les administrateurs (admin + superuser)."""
     from django.db.models import Q
     from users.models import CustomUser
-    from users.roles import APP_ADMIN_ROLES
+    from users.roles import APP_ADMIN_ROLES, ROLE_ADMIN, ROLE_SUPERUSER
 
     admins = CustomUser.objects.filter(is_active=True).filter(
-        Q(role__in=APP_ADMIN_ROLES) | Q(is_superuser=True)
+        Q(role__in=APP_ADMIN_ROLES)
+        | Q(role__in=[ROLE_ADMIN, ROLE_SUPERUSER, 'admin', 'superuser'])
+        | Q(is_superuser=True)
+        | Q(is_staff=True)
     ).distinct()
     results = []
-    for admin in admins:
-        results.append(
-            send_fcm_notification(
-                admin,
-                title,
-                body,
-                data=data,
-                type=type,
-                reference_id=reference_id,
-                translate=False,
-            )
+    if not admins.exists():
+        logger.warning(
+            "notify_admins: aucun admin actif pour « %s » (ref=%s)",
+            title,
+            reference_id,
         )
+        return results
+    for admin in admins:
+        try:
+            results.append(
+                send_fcm_notification(
+                    admin,
+                    title,
+                    body,
+                    data=data,
+                    type=type,
+                    reference_id=reference_id,
+                    translate=False,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "notify_admins: échec pour admin_id=%s « %s »",
+                getattr(admin, 'pk', None),
+                title,
+            )
     return results
