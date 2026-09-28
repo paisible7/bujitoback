@@ -274,20 +274,74 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         'supplier_tracking_number',
         'description',
         'current_location',
+        'warehouse_number',
+        'client_name',
+        'client_phone',
+        'order__user__email',
+        'order__user__phone_number',
+        'shipment_batches__code',
     ]
     pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
+        from django.db.models import Q
+
         if not self.request.user.is_authenticated:
             return Parcel.objects.none()
         queryset = Parcel.objects.select_related('order__user').prefetch_related(
             'consolidations',
             'shipment_batches',
             'extra_images',
+            'expeditions',
         )
         if is_app_admin(self.request.user):
-            return queryset
-        return queryset.filter(parcels_for_user_q(self.request.user)).distinct()
+            qs = queryset
+        else:
+            qs = queryset.filter(parcels_for_user_q(self.request.user)).distinct()
+
+        # Filtres admin : Bujito / autre transitaire / actions en attente
+        expedition = (self.request.query_params.get('expedition') or '').strip()
+        if expedition == 'other_forwarder':
+            qs = qs.filter(
+                Q(
+                    expeditions__mode='other_forwarder',
+                    expeditions__status__in=('quoted', 'awaiting_payment'),
+                )
+                | (
+                    Q(
+                        expeditions__mode='other_forwarder',
+                        expeditions__status='paid',
+                    )
+                    & (
+                        Q(expeditions__outbound_tracking_number='')
+                        | Q(expeditions__outbound_tracking_number__isnull=True)
+                    )
+                )
+            ).distinct()
+        elif expedition == 'bujito':
+            qs = qs.filter(
+                expeditions__mode='bujito_digital',
+                expeditions__status__in=(
+                    'quoted',
+                    'awaiting_payment',
+                    'paid',
+                ),
+            ).distinct()
+        elif expedition == 'to_dispatch':
+            qs = qs.filter(
+                expeditions__mode='other_forwarder',
+                expeditions__status='paid',
+            ).filter(
+                Q(expeditions__outbound_tracking_number='')
+                | Q(expeditions__outbound_tracking_number__isnull=True)
+            ).distinct()
+        elif expedition == 'awaiting_fee':
+            qs = qs.filter(
+                expeditions__mode='other_forwarder',
+                expeditions__status='quoted',
+            ).distinct()
+
+        return qs
 
     def perform_create(self, serializer):
         # Still check for admin for POST via IsAdminUser if we use it,
