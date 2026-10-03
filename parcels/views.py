@@ -41,7 +41,15 @@ class OrderListCreateView(generics.ListCreateAPIView):
     queryset = Order.objects.all()
     permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter]
-    search_fields = ['id', 'status', 'parcels__tracking_number']
+    search_fields = [
+        'id',
+        'status',
+        'client_name',
+        'client_phone',
+        'city',
+        'parcels__tracking_number',
+    ]
+    pagination_class = OptionalPageNumberPagination
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -55,8 +63,14 @@ class OrderListCreateView(generics.ListCreateAPIView):
             .order_by('-order_date')
         )
         if self.request.user.is_authenticated and is_app_admin(self.request.user):
-            return queryset
-        return queryset.filter(user=self.request.user)
+            pass
+        else:
+            queryset = queryset.filter(user=self.request.user)
+
+        status_filter = (self.request.query_params.get('status') or '').strip().lower()
+        if status_filter and status_filter != 'all':
+            queryset = queryset.filter(status=status_filter)
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

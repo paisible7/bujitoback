@@ -53,6 +53,17 @@ class CustomUser(AbstractUser):
         verbose_name=_('Étoiles client (0–5)'),
         help_text=_('Notation admin : 0 = non noté, 1 à 5 = niveau client.'),
     )
+    # Fondation permissions admin : liste vide = accès total (compatibilité).
+    # Attribution UI / filtrage des menus : à brancher plus tard (Super Admin only).
+    admin_permissions = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name=_('Permissions admin'),
+        help_text=_(
+            'Clés de modules admin (orders, parcels, …). '
+            'Liste vide = tous les droits (comportement actuel).'
+        ),
+    )
 
     objects = CustomUserManager()
 

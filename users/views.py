@@ -4,19 +4,9 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from django.db.models import Q
+from django.db.models import Q, Count
 from django.contrib.auth import get_user_model
 
-from .serializers import (
-    RegisterSerializer,
-    UserSerializer,
-    AdminCreateUserSerializer,
-    AdminUserUpdateSerializer,
-    CustomTokenObtainPairSerializer,
-    PasswordResetVerifySerializer,
-    PasswordResetSerializer,
-    build_china_warehouse_address,
-)
 from .roles import (
     CLIENT_ROLES,
     ROLE_ADMIN,
@@ -26,6 +16,20 @@ from .roles import (
     normalize_role,
 )
 from .permissions import IsAppAdmin
+from .serializers import (
+    RegisterSerializer,
+    UserSerializer,
+    AdminCreateUserSerializer,
+    AdminUserUpdateSerializer,
+    CustomTokenObtainPairSerializer,
+    PasswordResetVerifySerializer,
+    PasswordResetSerializer,
+    build_china_warehouse_address,
+    build_china_air_address,
+    build_china_sea_address,
+)
+from .admin_permissions import normalize_admin_permissions
+from parcels.pagination import OptionalPageNumberPagination
 
 User = get_user_model()
 
@@ -65,7 +69,20 @@ class RegisterView(APIView):
             'phone_number': user.phone_number,
             'city': getattr(user, 'city', '') or '',
             'stars': getattr(user, 'stars', 0) or 0,
+            'admin_permissions': normalize_admin_permissions(
+                getattr(user, 'admin_permissions', None)
+            ),
             'china_warehouse_address': build_china_warehouse_address(
+                user.full_name,
+                user.phone_number,
+                getattr(user, 'city', '') or '',
+            ),
+            'china_air_address': build_china_air_address(
+                user.full_name,
+                user.phone_number,
+                getattr(user, 'city', '') or '',
+            ),
+            'china_sea_address': build_china_sea_address(
                 user.full_name,
                 user.phone_number,
                 getattr(user, 'city', '') or '',
@@ -91,7 +108,29 @@ class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        serializer = UserSerializer(request.user)
+        from parcels.models import Parcel
+        from parcels.ownership import parcels_for_user_q
+        from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
+
+        user = (
+            User.objects.filter(pk=request.user.pk)
+            .annotate(orders_count=Count('orders', distinct=True))
+            .first()
+        ) or request.user
+        # Colis réellement visibles par le client (commande, groupage, téléphone).
+        visible = Parcel.objects.filter(
+            parcels_for_user_q(request.user)
+        ).distinct()
+        user.parcels_count = visible.count()
+        user.parcels_received_count = visible.filter(
+            status__in=PARCEL_RECEIVED_STATUSES
+        ).count()
+        user.parcels_sent_count = visible.filter(
+            status__in=PARCEL_SENT_STATUSES
+        ).count()
+        if not hasattr(user, 'orders_count'):
+            user.orders_count = request.user.orders.count()
+        serializer = UserSerializer(user)
         return Response(serializer.data)
 
 
@@ -102,6 +141,7 @@ class UserListCreateView(generics.ListCreateAPIView):
     - Superuser : voit clients + admins, peut créer clients et admins
     """
     permission_classes = [IsAuthenticated, IsAppAdmin]
+    pagination_class = OptionalPageNumberPagination
 
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -109,6 +149,8 @@ class UserListCreateView(generics.ListCreateAPIView):
         return UserSerializer
 
     def get_queryset(self):
+        from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
+
         actor = self.request.user
         if is_platform_superuser(actor):
             qs = User.objects.filter(
@@ -139,7 +181,20 @@ class UserListCreateView(generics.ListCreateAPIView):
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
             )
-        return qs
+        return qs.annotate(
+            orders_count=Count('orders', distinct=True),
+            parcels_count=Count('orders__parcels', distinct=True),
+            parcels_received_count=Count(
+                'orders__parcels',
+                filter=Q(orders__parcels__status__in=PARCEL_RECEIVED_STATUSES),
+                distinct=True,
+            ),
+            parcels_sent_count=Count(
+                'orders__parcels',
+                filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
+                distinct=True,
+            ),
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = AdminCreateUserSerializer(
@@ -163,10 +218,27 @@ class UserAdminDetailView(generics.RetrieveUpdateAPIView):
     def get_queryset(self):
         actor = self.request.user
         if is_platform_superuser(actor):
-            return User.objects.filter(
+            qs = User.objects.filter(
                 role__in=[ROLE_CLIENT, ROLE_ADMIN, 'user'],
             )
-        return User.objects.filter(role__in=CLIENT_ROLES)
+        else:
+            qs = User.objects.filter(role__in=CLIENT_ROLES)
+        from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
+
+        return qs.annotate(
+            orders_count=Count('orders', distinct=True),
+            parcels_count=Count('orders__parcels', distinct=True),
+            parcels_received_count=Count(
+                'orders__parcels',
+                filter=Q(orders__parcels__status__in=PARCEL_RECEIVED_STATUSES),
+                distinct=True,
+            ),
+            parcels_sent_count=Count(
+                'orders__parcels',
+                filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
+                distinct=True,
+            ),
+        )
 
     def get_serializer_class(self):
         if self.request.method == 'PATCH':

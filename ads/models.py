@@ -9,6 +9,10 @@ AD_SCREEN_CHOICES = (
     ('grouping', _('Groupage')),
     ('tracking', _('Suivi')),
     ('profile', _('Profil')),
+    ('transfer', _('Transfert d\'argent')),
+    ('received_orders', _('Commandes reçues')),
+    ('payments', _('Paiement')),
+    ('notifications', _('Notifications')),
 )
 AD_SCREEN_KEYS = {key for key, _ in AD_SCREEN_CHOICES}
 
@@ -25,7 +29,10 @@ class Advertisement(models.Model):
         default=list,
         blank=True,
         verbose_name=_('Écrans'),
-        help_text=_('Liste des clés d\'écran : home, orders, grouping, tracking, profile'),
+        help_text=_(
+            'Liste des clés d\'écran : home, orders, grouping, tracking, '
+            'profile, transfer, received_orders, payments, notifications'
+        ),
     )
     starts_at = models.DateTimeField(
         null=True,

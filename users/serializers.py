@@ -9,6 +9,9 @@ from .roles import (
     is_platform_superuser,
     normalize_role,
 )
+from .admin_permissions import (
+    normalize_admin_permissions,
+)
 
 User = get_user_model()
 
@@ -20,42 +23,94 @@ WAREHOUSE_STREET = (
 )
 
 
-def _warehouse_parts():
-    """Téléphone + rue globaux (modifiables admin via BusinessSettings)."""
+def _business_settings():
     try:
         from pricing.models import BusinessSettings
 
-        settings = BusinessSettings.load()
-        phone = (settings.china_warehouse_phone or '').strip() or WAREHOUSE_PHONE
-        street = (settings.china_warehouse_street or '').strip() or WAREHOUSE_STREET
-        return phone, street
+        return BusinessSettings.load()
     except Exception:
+        return None
+
+
+def _warehouse_parts():
+    """Téléphone + rue globaux (modifiables admin via BusinessSettings)."""
+    settings = _business_settings()
+    if settings is None:
         return WAREHOUSE_PHONE, WAREHOUSE_STREET
+    phone = (settings.china_warehouse_phone or '').strip() or WAREHOUSE_PHONE
+    street = (settings.china_warehouse_street or '').strip() or WAREHOUSE_STREET
+    return phone, street
+
+
+def _client_paren(full_name: str, phone_number, city: str) -> str:
+    name = (full_name or '').strip() or 'Client'
+    phone = (phone_number or '').strip()
+    ville = (city or '').strip()
+    return ' '.join(p for p in (name, phone, ville) if p)
 
 
 def build_china_warehouse_address(full_name: str, phone_number, city: str) -> str:
     """Adresse à coller sur les colis Chine : BU.Nom + entrepôt + (nom tél ville)."""
     name = (full_name or '').strip() or 'Client'
-    phone = (phone_number or '').strip()
-    ville = (city or '').strip()
-    paren_parts = [p for p in (name, phone, ville) if p]
-    paren = ' '.join(paren_parts)
+    paren = _client_paren(full_name, phone_number, city)
     warehouse_phone, warehouse_street = _warehouse_parts()
     return f'BU.{name} {warehouse_phone} {warehouse_street} ( {paren} )'
 
 
+def build_transport_address(base: str, full_name: str, phone_number, city: str) -> str:
+    """Adresse aérien / maritime + mention client pour copie."""
+    text = (base or '').strip()
+    if not text:
+        return ''
+    paren = _client_paren(full_name, phone_number, city)
+    if not paren:
+        return text
+    return f'{text} ( {paren} )'
+
+
+def build_china_air_address(full_name: str, phone_number, city: str) -> str:
+    settings = _business_settings()
+    base = (getattr(settings, 'china_air_address', '') or '') if settings else ''
+    return build_transport_address(base, full_name, phone_number, city)
+
+
+def build_china_sea_address(full_name: str, phone_number, city: str) -> str:
+    settings = _business_settings()
+    base = (getattr(settings, 'china_sea_address', '') or '') if settings else ''
+    return build_transport_address(base, full_name, phone_number, city)
+
+
 class UserSerializer(serializers.ModelSerializer):
     china_warehouse_address = serializers.SerializerMethodField()
+    china_air_address = serializers.SerializerMethodField()
+    china_sea_address = serializers.SerializerMethodField()
+    orders_count = serializers.IntegerField(read_only=True, required=False, default=0)
+    parcels_count = serializers.IntegerField(read_only=True, required=False, default=0)
+    parcels_received_count = serializers.IntegerField(
+        read_only=True, required=False, default=0
+    )
+    parcels_sent_count = serializers.IntegerField(
+        read_only=True, required=False, default=0
+    )
+    admin_permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = (
             'id', 'email', 'role', 'full_name', 'phone_number', 'city',
             'is_active', 'stars', 'china_warehouse_address',
+            'china_air_address', 'china_sea_address',
+            'orders_count', 'parcels_count',
+            'parcels_received_count', 'parcels_sent_count',
+            'admin_permissions',
         )
         read_only_fields = (
             'id', 'email', 'role', 'full_name', 'phone_number', 'city',
             'is_active', 'china_warehouse_address',
+            'china_air_address', 'china_sea_address',
+            'orders_count', 'parcels_count',
+            'parcels_received_count', 'parcels_sent_count',
+            'admin_permissions',
         )
 
     def get_china_warehouse_address(self, obj):
@@ -64,6 +119,49 @@ class UserSerializer(serializers.ModelSerializer):
             obj.phone_number,
             getattr(obj, 'city', '') or '',
         )
+
+    def get_china_air_address(self, obj):
+        return build_china_air_address(
+            obj.full_name,
+            obj.phone_number,
+            getattr(obj, 'city', '') or '',
+        )
+
+    def get_china_sea_address(self, obj):
+        return build_china_sea_address(
+            obj.full_name,
+            obj.phone_number,
+            getattr(obj, 'city', '') or '',
+        )
+
+    def get_admin_permissions(self, obj):
+        # Liste stockée normalisée (vide = accès total côté helpers Flutter/backend).
+        return normalize_admin_permissions(
+            getattr(obj, 'admin_permissions', None)
+        )
+
+    def to_representation(self, instance):
+        from parcels.models import Parcel
+        from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
+
+        data = super().to_representation(instance)
+        if not hasattr(instance, 'orders_count'):
+            data['orders_count'] = instance.orders.count()
+        if not hasattr(instance, 'parcels_count'):
+            data['parcels_count'] = Parcel.objects.filter(
+                order__user_id=instance.pk
+            ).count()
+        if not hasattr(instance, 'parcels_received_count'):
+            data['parcels_received_count'] = Parcel.objects.filter(
+                order__user_id=instance.pk,
+                status__in=PARCEL_RECEIVED_STATUSES,
+            ).count()
+        if not hasattr(instance, 'parcels_sent_count'):
+            data['parcels_sent_count'] = Parcel.objects.filter(
+                order__user_id=instance.pk,
+                status__in=PARCEL_SENT_STATUSES,
+            ).count()
+        return data
 
 
 class AdminUserUpdateSerializer(serializers.ModelSerializer):
@@ -275,7 +373,20 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'phone_number': user.phone_number,
             'city': getattr(user, 'city', '') or '',
             'stars': getattr(user, 'stars', 0) or 0,
+            'admin_permissions': normalize_admin_permissions(
+                getattr(user, 'admin_permissions', None)
+            ),
             'china_warehouse_address': build_china_warehouse_address(
+                user.full_name,
+                user.phone_number,
+                getattr(user, 'city', '') or '',
+            ),
+            'china_air_address': build_china_air_address(
+                user.full_name,
+                user.phone_number,
+                getattr(user, 'city', '') or '',
+            ),
+            'china_sea_address': build_china_sea_address(
                 user.full_name,
                 user.phone_number,
                 getattr(user, 'city', '') or '',

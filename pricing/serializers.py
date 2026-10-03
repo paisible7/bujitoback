@@ -32,6 +32,8 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "usd_to_cny",
             "china_warehouse_phone",
             "china_warehouse_street",
+            "china_air_address",
+            "china_sea_address",
             "alipay_qr_url",
             "wechat_qr_url",
             "updated_at",

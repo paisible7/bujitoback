@@ -61,3 +61,22 @@ def apply_role_flags(user) -> None:
         # Admin app et clients : pas d'accès Django admin
         user.is_staff = False
         user.is_superuser = False
+
+
+# Re-exports pour convenience (fondation permissions — non branché sur l'UI).
+def has_admin_permission(user, key: str) -> bool:
+    from .admin_permissions import has_admin_permission as _has
+
+    return _has(user, key)
+
+
+def normalize_admin_permissions(raw) -> list[str]:
+    from .admin_permissions import normalize_admin_permissions as _norm
+
+    return _norm(raw)
+
+
+def effective_admin_permissions(user) -> list[str]:
+    from .admin_permissions import effective_admin_permissions as _eff
+
+    return _eff(user)

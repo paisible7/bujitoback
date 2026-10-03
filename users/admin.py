@@ -29,6 +29,7 @@ class CustomUserAdmin(BaseUserAdmin):
         (_('Rôles et permissions'), {
             'fields': (
                 'role',
+                'admin_permissions',
                 'is_active',
                 'is_staff',
                 'is_superuser',
@@ -56,7 +57,8 @@ class CustomUserAdmin(BaseUserAdmin):
     )
 
     filter_horizontal = ('groups', 'user_permissions')
-    readonly_fields = ('last_login', 'date_joined')
+    # Lecture seule pour cette fondation : l'attribution UI viendra plus tard.
+    readonly_fields = ('last_login', 'date_joined', 'admin_permissions')
 
     def save_model(self, request, obj, form, change):
         obj.role = normalize_role(obj.role)

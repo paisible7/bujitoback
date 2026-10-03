@@ -124,6 +124,17 @@ class BusinessSettings(models.Model):
         ),
         verbose_name=_("Entrepôt Chine — adresse"),
     )
+    # Adresses distinctes aérien / maritime (texte libre, admin).
+    china_air_address = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("Adresse aérien Chine"),
+    )
+    china_sea_address = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("Adresse maritime Chine"),
+    )
 
     # --- CBM ---
     cbm_rate_usd = models.DecimalField(
