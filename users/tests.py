@@ -1,7 +1,11 @@
-from django.contrib.auth import get_user_model
-from django.test import TestCase
-from rest_framework.test import APIClient
+from io import BytesIO
 from unittest.mock import patch
+
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase
+from PIL import Image
+from rest_framework.test import APIClient
 
 from parcels.models import Order, Parcel
 from pricing.models import BusinessSettings
@@ -121,3 +125,75 @@ class ProfileCountsAndAddressesTests(TestCase):
         self.assertIn('Air Address Guangzhou', data['china_air_address'])
         self.assertIn('Sea Address Ningbo', data['china_sea_address'])
         self.assertIn('BU.Client Counts', data['china_warehouse_address'])
+
+class ProfilePhotoAndAgentAccessTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.superuser = User.objects.create_user(
+            email='super@bujito.com',
+            password='Pass123!',
+            role='superuser',
+            full_name='Super Admin',
+        )
+        self.agent = User.objects.create_user(
+            email='agent@bujito.com',
+            password='Pass123!',
+            role='admin',
+            full_name='Agent Admin',
+        )
+        self.client_user = User.objects.create_user(
+            email='photo@bujito.com',
+            password='Pass123!',
+            full_name='Photo Client',
+        )
+
+    def _make_image(self):
+        buf = BytesIO()
+        Image.new('RGB', (8, 8), color=(255, 200, 0)).save(buf, format='JPEG')
+        return SimpleUploadedFile('avatar.jpg', buf.getvalue(), content_type='image/jpeg')
+
+    def test_profile_photo_upload(self):
+        self.client.force_authenticate(self.client_user)
+        response = self.client.patch(
+            '/api/auth/profile/',
+            {
+                'full_name': 'Photo Client Updated',
+                'profile_photo': self._make_image(),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['full_name'], 'Photo Client Updated')
+        self.assertTrue(response.data.get('profile_photo_url'))
+        self.client_user.refresh_from_db()
+        self.assertTrue(bool(self.client_user.profile_photo))
+
+    def test_superuser_can_patch_agent_permissions(self):
+        self.client.force_authenticate(self.superuser)
+        response = self.client.patch(
+            f'/api/auth/users/{self.agent.id}/',
+            {'admin_permissions': ['stats', 'accounting'], 'is_active': True},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.agent.refresh_from_db()
+        self.assertEqual(
+            sorted(self.agent.admin_permissions or []),
+            ['accounting', 'stats'],
+        )
+
+    def test_admin_cannot_patch_agent_permissions(self):
+        other = User.objects.create_user(
+            email='other-admin@bujito.com',
+            password='Pass123!',
+            role='admin',
+        )
+        self.client.force_authenticate(other)
+        response = self.client.patch(
+            f'/api/auth/users/{self.agent.id}/',
+            {'admin_permissions': ['stats']},
+            format='json',
+        )
+        self.assertNotEqual(response.status_code, 200)
+        self.agent.refresh_from_db()
+        self.assertEqual(self.agent.admin_permissions, [])

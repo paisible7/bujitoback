@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'orders',
     'pricing.apps.PricingConfig',
     'ads.apps.AdsConfig',
+    'reports.apps.ReportsConfig',
 ]
 
 MIDDLEWARE = [

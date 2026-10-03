@@ -54,7 +54,7 @@ class CustomUser(AbstractUser):
         help_text=_('Notation admin : 0 = non noté, 1 à 5 = niveau client.'),
     )
     # Fondation permissions admin : liste vide = accès total (compatibilité).
-    # Attribution UI / filtrage des menus : à brancher plus tard (Super Admin only).
+    # Attribution UI : Super Admin only.
     admin_permissions = models.JSONField(
         default=list,
         blank=True,
@@ -63,6 +63,12 @@ class CustomUser(AbstractUser):
             'Clés de modules admin (orders, parcels, …). '
             'Liste vide = tous les droits (comportement actuel).'
         ),
+    )
+    profile_photo = models.ImageField(
+        upload_to='users/avatars/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_('Photo de profil'),
     )
 
     objects = CustomUserManager()

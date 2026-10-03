@@ -21,6 +21,8 @@ from .serializers import (
     UserSerializer,
     AdminCreateUserSerializer,
     AdminUserUpdateSerializer,
+    AdminAgentUpdateSerializer,
+    ProfileUpdateSerializer,
     CustomTokenObtainPairSerializer,
     PasswordResetVerifySerializer,
     PasswordResetSerializer,
@@ -28,6 +30,7 @@ from .serializers import (
     build_china_air_address,
     build_china_sea_address,
 )
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from .admin_permissions import normalize_admin_permissions
 from parcels.pagination import OptionalPageNumberPagination
 
@@ -106,8 +109,9 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
 class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
-    def get(self, request):
+    def _enriched_user(self, request):
         from parcels.models import Parcel
         from parcels.ownership import parcels_for_user_q
         from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
@@ -117,7 +121,6 @@ class UserProfileView(APIView):
             .annotate(orders_count=Count('orders', distinct=True))
             .first()
         ) or request.user
-        # Colis réellement visibles par le client (commande, groupage, téléphone).
         visible = Parcel.objects.filter(
             parcels_for_user_q(request.user)
         ).distinct()
@@ -130,8 +133,24 @@ class UserProfileView(APIView):
         ).count()
         if not hasattr(user, 'orders_count'):
             user.orders_count = request.user.orders.count()
-        serializer = UserSerializer(user)
+        return user
+
+    def get(self, request):
+        user = self._enriched_user(request)
+        serializer = UserSerializer(user, context={'request': request})
         return Response(serializer.data)
+
+    def patch(self, request):
+        serializer = ProfileUpdateSerializer(
+            request.user,
+            data=request.data,
+            partial=True,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        user = self._enriched_user(request)
+        return Response(UserSerializer(user, context={'request': request}).data)
 
 
 class UserListCreateView(generics.ListCreateAPIView):
@@ -245,14 +264,41 @@ class UserAdminDetailView(generics.RetrieveUpdateAPIView):
             return AdminUserUpdateSerializer
         return UserSerializer
 
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['request'] = self.request
+        return ctx
+
     def patch(self, request, *args, **kwargs):
         instance = self.get_object()
+        # Super Admin : mise à jour permissions / activation d'un agent.
+        if (
+            is_platform_superuser(request.user)
+            and normalize_role(instance.role) == ROLE_ADMIN
+            and (
+                'admin_permissions' in request.data
+                or 'is_active' in request.data
+            )
+        ):
+            serializer = AdminAgentUpdateSerializer(
+                instance, data=request.data, partial=True
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            instance.refresh_from_db()
+            return Response(
+                UserSerializer(instance, context={'request': request}).data
+            )
+
         serializer = AdminUserUpdateSerializer(
             instance, data=request.data, partial=True
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response(UserSerializer(instance).data)
+        instance.refresh_from_db()
+        return Response(
+            UserSerializer(instance, context={'request': request}).data
+        )
 
 
 class PasswordResetVerifyView(APIView):

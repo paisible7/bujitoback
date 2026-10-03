@@ -1,4 +1,4 @@
-"""Catalogue des permissions admin (fondation — pas encore appliqué à l'UI).
+"""Catalogue des permissions admin.
 
 Règle de compatibilité (has_admin_permission) :
 - Super Admin → toujours True
@@ -19,6 +19,10 @@ PERM_PRICING = 'pricing'
 PERM_ADS = 'ads'
 PERM_NOTIFICATIONS = 'notifications'
 PERM_IMPORT = 'import'
+PERM_STATS = 'stats'
+PERM_ACCOUNTING = 'accounting'
+PERM_CLIENT_SERVICE = 'client_service'
+PERM_AGENTS = 'agents'
 
 ADMIN_PERMISSION_KEYS: tuple[str, ...] = (
     PERM_ORDERS,
@@ -31,6 +35,10 @@ ADMIN_PERMISSION_KEYS: tuple[str, ...] = (
     PERM_ADS,
     PERM_NOTIFICATIONS,
     PERM_IMPORT,
+    PERM_STATS,
+    PERM_ACCOUNTING,
+    PERM_CLIENT_SERVICE,
+    PERM_AGENTS,
 )
 
 ADMIN_PERMISSION_SET = frozenset(ADMIN_PERMISSION_KEYS)
@@ -47,6 +55,10 @@ ADMIN_PERMISSION_LABELS_FR: dict[str, str] = {
     PERM_ADS: 'Affiches',
     PERM_NOTIFICATIONS: 'Notifications',
     PERM_IMPORT: 'Import',
+    PERM_STATS: 'Statistiques',
+    PERM_ACCOUNTING: 'Comptabilité',
+    PERM_CLIENT_SERVICE: 'Service client',
+    PERM_AGENTS: 'Agents & accès',
 }
 
 
@@ -55,7 +67,6 @@ def normalize_admin_permissions(raw) -> list[str]:
     if raw is None:
         return []
     if isinstance(raw, str):
-        # "orders,parcels" ou JSON-like simple
         raw = [p.strip() for p in raw.split(',') if p.strip()]
     if not isinstance(raw, (list, tuple, set)):
         return []
@@ -78,12 +89,6 @@ def get_user_admin_permissions(user) -> list[str]:
 
 
 def has_admin_permission(user, key: str) -> bool:
-    """
-    Vérifie une permission admin.
-
-    Ne remplace pas is_app_admin pour l'accès global : à brancher plus tard
-    sur les menus / vues. Pour l'instant, liste vide = accès total (admins).
-    """
     from .roles import is_app_admin, is_platform_superuser, normalize_role, ROLE_ADMIN
 
     if user is None or not getattr(user, 'is_authenticated', False):
@@ -96,17 +101,14 @@ def has_admin_permission(user, key: str) -> bool:
     if not is_app_admin(user):
         return False
     if normalize_role(getattr(user, 'role', None)) != ROLE_ADMIN:
-        # Autres rôles admin-like : accès total (sécurité future)
         return True
     perms = get_user_admin_permissions(user)
     if not perms:
-        # Compatibilité : admin sans droits assignés = tout
         return True
     return perm in perms
 
 
 def admin_has_full_access(user) -> bool:
-    """True si superuser ou admin sans restriction (liste vide)."""
     from .roles import is_platform_superuser, is_app_admin
 
     if is_platform_superuser(user):
@@ -117,13 +119,6 @@ def admin_has_full_access(user) -> bool:
 
 
 def effective_admin_permissions(user) -> list[str]:
-    """
-    Liste effective pour le client (Flutter).
-
-    Super Admin / admin sans restriction → catalogue complet.
-    Admin restreint → ses clés uniquement.
-    Autres → [].
-    """
     from .roles import is_app_admin, is_platform_superuser
 
     if not is_app_admin(user):

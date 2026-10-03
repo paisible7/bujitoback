@@ -30,6 +30,7 @@ urlpatterns = [
     path('api/orders/', include('orders.urls')),
     path('api/pricing/', include('pricing.urls')),
     path('api/ads/', include('ads.urls')),
+    path('api/admin/', include('reports.urls')),
 ]
 
 # Media : django.conf.urls.static.static() ne fait RIEN si DEBUG=False.

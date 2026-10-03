@@ -84,6 +84,7 @@ class UserSerializer(serializers.ModelSerializer):
     china_warehouse_address = serializers.SerializerMethodField()
     china_air_address = serializers.SerializerMethodField()
     china_sea_address = serializers.SerializerMethodField()
+    profile_photo_url = serializers.SerializerMethodField()
     orders_count = serializers.IntegerField(read_only=True, required=False, default=0)
     parcels_count = serializers.IntegerField(read_only=True, required=False, default=0)
     parcels_received_count = serializers.IntegerField(
@@ -100,6 +101,7 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'email', 'role', 'full_name', 'phone_number', 'city',
             'is_active', 'stars', 'china_warehouse_address',
             'china_air_address', 'china_sea_address',
+            'profile_photo_url',
             'orders_count', 'parcels_count',
             'parcels_received_count', 'parcels_sent_count',
             'admin_permissions',
@@ -108,6 +110,7 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'email', 'role', 'full_name', 'phone_number', 'city',
             'is_active', 'china_warehouse_address',
             'china_air_address', 'china_sea_address',
+            'profile_photo_url',
             'orders_count', 'parcels_count',
             'parcels_received_count', 'parcels_sent_count',
             'admin_permissions',
@@ -132,6 +135,15 @@ class UserSerializer(serializers.ModelSerializer):
             obj.full_name,
             obj.phone_number,
             getattr(obj, 'city', '') or '',
+        )
+
+    def get_profile_photo_url(self, obj):
+        from parcels.media_urls import absolute_media_url
+
+        return absolute_media_url(
+            getattr(obj, 'profile_photo', None),
+            self.context.get('request'),
+            label='profile_photo',
         )
 
     def get_admin_permissions(self, obj):
@@ -182,6 +194,71 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
                     "Les étoiles ne s'appliquent qu'aux clients."
                 )
         return attrs
+
+
+class AdminAgentUpdateSerializer(serializers.Serializer):
+    """Super Admin : permissions / activation d'un agent admin."""
+
+    admin_permissions = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+    )
+    is_active = serializers.BooleanField(required=False)
+
+    def validate_admin_permissions(self, value):
+        return normalize_admin_permissions(value)
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is None:
+            return attrs
+        role = normalize_role(instance.role)
+        if role not in (ROLE_ADMIN,):
+            raise serializers.ValidationError(
+                "Les permissions agents ne s'appliquent qu'aux administrateurs."
+            )
+        if is_platform_superuser(instance):
+            raise serializers.ValidationError(
+                "Impossible de modifier les permissions d'un Super Admin."
+            )
+        if not attrs:
+            raise serializers.ValidationError("Aucune modification fournie.")
+        return attrs
+
+    def update(self, instance, validated_data):
+        if 'admin_permissions' in validated_data:
+            instance.admin_permissions = validated_data['admin_permissions']
+        if 'is_active' in validated_data:
+            instance.is_active = validated_data['is_active']
+        instance.save()
+        return instance
+
+
+class ProfileUpdateSerializer(serializers.ModelSerializer):
+    """Client / admin : mise à jour de son propre profil (+ photo)."""
+
+    class Meta:
+        model = User
+        fields = ('full_name', 'phone_number', 'city', 'profile_photo')
+        extra_kwargs = {
+            'full_name': {'required': False, 'allow_blank': True},
+            'phone_number': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'city': {'required': False, 'allow_blank': True},
+            'profile_photo': {'required': False, 'allow_null': True},
+        }
+
+    def validate_phone_number(self, value):
+        phone = (value or '').strip()
+        if not phone:
+            return None
+        qs = User.objects.filter(phone_number__iexact=phone)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(
+                "Ce numéro de téléphone est déjà utilisé."
+            )
+        return phone
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -392,6 +469,16 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 getattr(user, 'city', '') or '',
             ),
         }
+        try:
+            from parcels.media_urls import absolute_media_url
+
+            data['profile_photo_url'] = absolute_media_url(
+                getattr(user, 'profile_photo', None),
+                self.context.get('request'),
+                label='profile_photo',
+            )
+        except Exception:
+            data['profile_photo_url'] = None
         print(f'[auth/login.validate] OK user_id={user.pk} role={data["role"]}')
         return data
 

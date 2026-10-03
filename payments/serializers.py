@@ -40,6 +40,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             'id',
+            'user',
             'order',
             'expedition',
             'amount',
