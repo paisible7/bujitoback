@@ -249,3 +249,50 @@ class ParcelProvisioningTests(TestCase):
             "SUPPLIER-TRACK-001",
         )
         self.assertEqual(generated.status, "pending")
+
+
+class OrderPaginationTests(TestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="orders-page@example.com",
+            password="test-password",
+        )
+        self.signal_notification = patch("parcels.signals.send_fcm_notification")
+        self.signal_admin_notification = patch("parcels.signals.notify_admins")
+        self.signal_notification.start()
+        self.signal_admin_notification.start()
+        self.addCleanup(self.signal_notification.stop)
+        self.addCleanup(self.signal_admin_notification.stop)
+        for i in range(25):
+            Order.objects.create(
+                user=self.user,
+                status="pending" if i % 2 == 0 else "shipped",
+            )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_orders_without_page_return_full_list(self):
+        response = self.client.get(reverse("order-list-create"))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.data, list)
+        self.assertEqual(len(response.data), 25)
+
+    def test_orders_with_page_are_paginated(self):
+        response = self.client.get(
+            reverse("order-list-create"),
+            {"page": 1, "page_size": 10},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 25)
+        self.assertEqual(len(response.data["results"]), 10)
+
+    def test_orders_status_filter_with_pagination(self):
+        response = self.client.get(
+            reverse("order-list-create"),
+            {"page": 1, "page_size": 50, "status": "pending"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 13)
+        self.assertTrue(
+            all(item["status"] == "pending" for item in response.data["results"])
+        )

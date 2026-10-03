@@ -1,6 +1,10 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
+from unittest.mock import patch
+
+from parcels.models import Order, Parcel
+from pricing.models import BusinessSettings
 
 User = get_user_model()
 
@@ -56,3 +60,64 @@ class PasswordResetFlowTests(TestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 400)
+
+
+class ProfileCountsAndAddressesTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email='counts@bujito.com',
+            password='Pass123!',
+            full_name='Client Counts',
+            phone_number='+243811111111',
+            city='Kinshasa',
+        )
+        settings = BusinessSettings.load()
+        settings.china_air_address = 'Air Address Guangzhou'
+        settings.china_sea_address = 'Sea Address Ningbo'
+        settings.save()
+        self.signal_notification = patch('parcels.signals.send_fcm_notification')
+        self.signal_admin_notification = patch('parcels.signals.notify_admins')
+        self.signal_notification.start()
+        self.signal_admin_notification.start()
+        self.addCleanup(self.signal_notification.stop)
+        self.addCleanup(self.signal_admin_notification.stop)
+
+        order = Order.objects.create(user=self.user, quote_ready=True)
+        Parcel.objects.create(
+            order=order,
+            tracking_number='TRK-RCV-1',
+            status='pending',
+        )
+        Parcel.objects.create(
+            order=order,
+            tracking_number='TRK-RCV-2',
+            status='consolidated',
+        )
+        Parcel.objects.create(
+            order=order,
+            tracking_number='TRK-SENT-1',
+            status='in_transit',
+        )
+        Parcel.objects.create(
+            order=order,
+            tracking_number='TRK-SENT-2',
+            status='delivered',
+        )
+        Parcel.objects.create(
+            order=order,
+            tracking_number='TRK-WAIT-1',
+            status='awaiting_arrival',
+        )
+
+    def test_profile_exposes_received_sent_counts_and_addresses(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get('/api/auth/profile/')
+        self.assertEqual(response.status_code, 200)
+        data = response.data
+        self.assertEqual(data['parcels_count'], 5)
+        self.assertEqual(data['parcels_received_count'], 2)
+        self.assertEqual(data['parcels_sent_count'], 2)
+        self.assertIn('Air Address Guangzhou', data['china_air_address'])
+        self.assertIn('Sea Address Ningbo', data['china_sea_address'])
+        self.assertIn('BU.Client Counts', data['china_warehouse_address'])

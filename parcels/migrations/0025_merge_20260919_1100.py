@@ -6,7 +6,8 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('parcels', '0024_alter_expeditionrequest_loyalty_discount_usd'),
+        # Historique : branche loyalty (0023) + express category (0024).
+        ('parcels', '0023_expedition_loyalty_discount'),
         ('parcels', '0024_expedition_express_category'),
     ]
 

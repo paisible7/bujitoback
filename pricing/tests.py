@@ -102,3 +102,22 @@ class PricingApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["billable_kg"], 0.5)
         self.assertEqual(response.data["amount_usd"], 8.5)
+
+    def test_admin_can_patch_air_and_sea_addresses(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.patch(
+            "/api/pricing/settings/",
+            {
+                "china_air_address": "Air WH Guangzhou",
+                "china_sea_address": "Sea Port Ningbo",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["china_air_address"], "Air WH Guangzhou")
+        self.assertEqual(response.data["china_sea_address"], "Sea Port Ningbo")
+
+        read = self.client.get("/api/pricing/settings/")
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(read.data["china_air_address"], "Air WH Guangzhou")
+        self.assertEqual(read.data["china_sea_address"], "Sea Port Ningbo")
