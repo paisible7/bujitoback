@@ -37,9 +37,18 @@ from users.models import CustomUser
 from notifications.utils import notify_admins, send_fcm_notification
 from .pagination import OptionalPageNumberPagination
 
+
+def _order_image_uploads(request):
+    uploads = []
+    for field in ('images', 'images[]', 'image'):
+        uploads.extend(request.FILES.getlist(field))
+    return uploads
+
+
 class OrderListCreateView(generics.ListCreateAPIView):
     queryset = Order.objects.all()
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
     filter_backends = [filters.SearchFilter]
     search_fields = [
         'id',
@@ -99,7 +108,7 @@ class OrderListCreateView(generics.ListCreateAPIView):
                 except (TypeError, ValueError):
                     index_list.append(0)
 
-        uploads = request.FILES.getlist('images')
+        uploads = _order_image_uploads(request)
         for i, uploaded in enumerate(uploads):
             pkg_index = index_list[i] if i < len(index_list) else 0
             OrderImage.objects.create(
@@ -116,6 +125,7 @@ class OrderListCreateView(generics.ListCreateAPIView):
 class OrderDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
     queryset = Order.objects.all()
 
     def get_object(self):
@@ -157,7 +167,7 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
 
     def _sync_order_images(self, order, request):
         """Remplace / conserve les images selon keep_image_ids + nouveaux uploads."""
-        uploads = request.FILES.getlist('images')
+        uploads = _order_image_uploads(request)
         keep_raw = request.data.get('keep_image_ids', None)
         if keep_raw is None and not uploads:
             return

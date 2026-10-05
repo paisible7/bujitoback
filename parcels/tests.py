@@ -1,14 +1,21 @@
+from io import BytesIO
+from tempfile import TemporaryDirectory
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from django.test import override_settings
 from django.urls import reverse
+from PIL import Image
 from rest_framework.test import APIClient
 
+from pricing.models import BusinessSettings
 from users.models import CustomUser
 
+from .expedition_utils import build_expedition_quote, parcel_shipping_category
 from .fulfillment import provision_order_parcels
-from .models import Order
+from .models import Order, Parcel
 from .quote_utils import parse_product_items
 from .serializers import OrderQuoteSerializer
 
@@ -59,6 +66,61 @@ class OrderQuoteSerializerTests(TestCase):
         items = parse_product_items(quoted_order.product_links)
         self.assertEqual(items[0]["description"], "Produit présenté sur la photo")
         self.assertEqual(items[0]["url"], "")
+
+
+class OrderPhotoUploadTests(TestCase):
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="order-photo@example.com",
+            password="test-password",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _image(self, name):
+        image = BytesIO()
+        Image.new("RGB", (8, 8), color=(255, 200, 0)).save(image, format="JPEG")
+        return SimpleUploadedFile(name, image.getvalue(), content_type="image/jpeg")
+
+    def test_order_creation_accepts_single_and_multiple_photo_field_names(self):
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                response = self.client.post(
+                    reverse("order-list-create"),
+                    {
+                        "client_name": "Photo Client",
+                        "images": [self._image("product-1.jpg"), self._image("product-2.jpg")],
+                    },
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, 201, response.data)
+                order = Order.objects.get(pk=response.data["id"])
+                self.assertEqual(order.images.count(), 2)
+                self.assertTrue(all(image.image.storage.exists(image.image.name) for image in order.images.all()))
+
+
+class ComputerExpeditionPricingTests(TestCase):
+    def test_computer_parcels_are_charged_per_piece_without_weight(self):
+        parcels = [
+            Parcel.objects.create(
+                tracking_number=f'COMPUTER-{index}',
+                description='Ordinateur portable',
+            )
+            for index in (1, 2)
+        ]
+
+        self.assertEqual(parcel_shipping_category(parcels[0]), 'computer')
+        quote = build_expedition_quote(
+            parcels=parcels,
+            mode='bujito_digital',
+            transport_mode='air',
+            settings=BusinessSettings.load(),
+        )
+
+        self.assertEqual(quote['shipping_category'], 'computer')
+        self.assertEqual(quote['shipping_fee'], 200.0)
+        self.assertEqual(quote['total_due_now'], 200.0)
 
 
 class OrderStatusSyncTests(TestCase):

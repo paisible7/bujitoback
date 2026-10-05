@@ -89,7 +89,7 @@ class PricingEstimateView(APIView):
             result = cbm_cost(volume_cbm=volume, settings=cfg)
         else:
             category = data.get("category") or "ordinary"
-            if category != "phone" and weight is None:
+            if category not in {"phone", "computer"} and weight is None:
                 return Response(
                     {"message": "weight_kg is required"},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -97,6 +97,7 @@ class PricingEstimateView(APIView):
             result = shipping_cost(
                 category=category,
                 weight_kg=weight,
+                quantity=data.get("quantity", 1),
                 settings=cfg,
             )
 

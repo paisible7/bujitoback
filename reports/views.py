@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Q, Sum
@@ -12,12 +12,15 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework import generics
 from rest_framework.views import APIView
 
 from parcels.models import Order, Parcel
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 from payments.models import Payment
 from payments.serializers import PaymentSerializer
+from .models import Expense
+from .serializers import ExpenseSerializer
 from users.permissions import IsAppAdmin
 from users.roles import CLIENT_ROLES
 from users.serializers import (
@@ -90,6 +93,124 @@ def _filter_payments_by_type(qs, type_filter: str):
             | Q(provider_raw_response__type='expedition')
         )
     return qs
+
+
+def _filter_payment_search(qs, params):
+    name = (params.get('name') or '').strip()
+    client = (params.get('client') or '').strip()
+    search = (params.get('search') or '').strip()
+    amount = (params.get('amount') or '').strip()
+    date_value = (params.get('date') or '').strip()
+
+    if name:
+        qs = qs.filter(
+            Q(user__full_name__icontains=name)
+            | Q(user__email__icontains=name)
+            | Q(order__client_name__icontains=name)
+        )
+    if client:
+        qs = qs.filter(
+            Q(user__full_name__icontains=client)
+            | Q(user__email__icontains=client)
+            | Q(user__phone_number__icontains=client)
+            | Q(order__client_name__icontains=client)
+            | Q(order__client_phone__icontains=client)
+        )
+    if search:
+        qs = qs.filter(
+            Q(reference__icontains=search)
+            | Q(user__full_name__icontains=search)
+            | Q(user__email__icontains=search)
+            | Q(order__client_name__icontains=search)
+        )
+    if amount:
+        try:
+            qs = qs.filter(amount=Decimal(amount.replace(',', '.')))
+        except (InvalidOperation, ValueError):
+            pass
+    if date_value:
+        day = _parse_date(date_value)
+        if day:
+            qs = qs.filter(created_at__gte=day, created_at__lte=_parse_date(date_value, end=True))
+    return qs
+
+
+def _filter_expenses(qs, params):
+    name = (params.get('name') or '').strip()
+    client = (params.get('client') or '').strip()
+    search = (params.get('search') or '').strip()
+    amount = (params.get('amount') or '').strip()
+    date_value = (params.get('date') or '').strip()
+
+    if name:
+        qs = qs.filter(name__icontains=name)
+    if client:
+        qs = qs.filter(
+            Q(client__full_name__icontains=client)
+            | Q(client__email__icontains=client)
+            | Q(client__phone_number__icontains=client)
+        )
+    if search:
+        qs = qs.filter(
+            Q(name__icontains=search)
+            | Q(category__icontains=search)
+            | Q(description__icontains=search)
+            | Q(client__full_name__icontains=search)
+            | Q(client__email__icontains=search)
+        )
+    if amount:
+        try:
+            qs = qs.filter(amount=Decimal(amount.replace(',', '.')))
+        except (InvalidOperation, ValueError):
+            pass
+    if date_value:
+        try:
+            qs = qs.filter(expense_date=datetime.strptime(date_value[:10], '%Y-%m-%d').date())
+        except ValueError:
+            pass
+    return qs
+
+
+def _accounting_expenses(request):
+    qs = Expense.objects.select_related('client', 'recorded_by').all()
+    start, end = _period_bounds(request)
+    if start:
+        qs = qs.filter(expense_date__gte=start.date())
+    if end:
+        qs = qs.filter(expense_date__lte=end.date())
+    return _filter_expenses(qs, request.query_params)
+
+
+def _financial_summary(payments, expenses):
+    revenues = {}
+    for row in (
+        payments.filter(status='completed')
+        .values('currency')
+        .annotate(amount=Sum('amount'))
+    ):
+        currency = _normalize_currency(row['currency'])
+        revenues[currency] = revenues.get(currency, Decimal('0')) + (row['amount'] or Decimal('0'))
+
+    expense_totals = {}
+    for row in expenses.values('currency').annotate(amount=Sum('amount')):
+        currency = _normalize_currency(row['currency'])
+        expense_totals[currency] = expense_totals.get(currency, Decimal('0')) + (
+            row['amount'] or Decimal('0')
+        )
+    rows = []
+    for currency in sorted(set(revenues) | set(expense_totals)):
+        revenue = revenues.get(currency, Decimal('0'))
+        spent = expense_totals.get(currency, Decimal('0'))
+        net = revenue - spent
+        rows.append({
+            'currency': currency,
+            'revenue': float(revenue),
+            'expenses': float(spent),
+            'net': float(net),
+            'profit': float(max(net, Decimal('0'))),
+            'loss': float(max(-net, Decimal('0'))),
+        })
+    return rows
 
 
 def _normalize_currency(code: str | None) -> str:
@@ -249,6 +370,8 @@ class AdminAccountingView(APIView):
         )
         qs = _apply_created_range(qs, start, end, 'created_at')
         qs = _filter_payments_by_type(qs, type_filter)
+        qs = _filter_payment_search(qs, request.query_params)
+        expenses = _accounting_expenses(request)
 
         totals = _amount_buckets(qs)
         by_method = []
@@ -289,6 +412,8 @@ class AdminAccountingView(APIView):
                     'cancelled': totals.get('cancelled', []),
                 },
                 'by_method': by_method,
+                'financial_summary': _financial_summary(qs, expenses),
+                'expense_count': expenses.count(),
                 'count': total_count,
                 'page': page,
                 'page_size': page_size,
@@ -306,6 +431,7 @@ class AdminAccountingExportView(APIView):
         qs = Payment.objects.select_related('user', 'method').order_by('-created_at')
         qs = _apply_created_range(qs, start, end, 'created_at')
         qs = _filter_payments_by_type(qs, type_filter)
+        qs = _filter_payment_search(qs, request.query_params)
 
         response = HttpResponse(content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = 'attachment; filename="accounting_export.csv"'
@@ -345,6 +471,20 @@ class AdminAccountingExportView(APIView):
                 ]
             )
         return response
+
+
+class AdminAccountingExpensesView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    serializer_class = ExpenseSerializer
+
+    def get_queryset(self):
+        return _accounting_expenses(self.request)
+
+
+class AdminAccountingExpenseDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    serializer_class = ExpenseSerializer
+    queryset = Expense.objects.select_related('client', 'recorded_by')
 
 
 class AdminClientServiceView(APIView):

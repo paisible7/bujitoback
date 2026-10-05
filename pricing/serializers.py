@@ -21,6 +21,7 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "sensitive_days",
             "sensitive_note",
             "phone_flat_fee",
+            "computer_flat_fee",
             "phone_days",
             "grouping_flat_max_kg",
             "grouping_flat_fee",
@@ -30,6 +31,7 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "usd_to_gbp",
             "usd_to_xof",
             "usd_to_cny",
+            "alipay_wechat_recharge_fee_percent",
             "china_warehouse_phone",
             "china_warehouse_street",
             "china_air_address",
@@ -58,10 +60,11 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
 class EstimateSerializer(serializers.Serializer):
     kind = serializers.ChoiceField(choices=["shipping", "grouping", "cbm"])
     category = serializers.ChoiceField(
-        choices=["ordinary", "express", "sensitive", "phone"],
+        choices=["ordinary", "express", "sensitive", "phone", "computer"],
         required=False,
         default="ordinary",
     )
+    quantity = serializers.IntegerField(required=False, default=1, min_value=1)
     weight_kg = serializers.DecimalField(
         max_digits=10,
         decimal_places=3,

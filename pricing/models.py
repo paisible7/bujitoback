@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -59,6 +60,12 @@ class BusinessSettings(models.Model):
         default=Decimal("36.00"),
         verbose_name=_("Téléphone — forfait $"),
     )
+    computer_flat_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("100.00"),
+        verbose_name=_("Ordinateur — forfait par pièce $"),
+    )
     phone_days = models.PositiveSmallIntegerField(
         default=21,
         verbose_name=_("Téléphone — délai (jours)"),
@@ -108,6 +115,13 @@ class BusinessSettings(models.Model):
         decimal_places=4,
         default=Decimal("6.3000"),
         verbose_name=_("1 USD → CNY (yuan)"),
+    )
+    alipay_wechat_recharge_fee_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("15.87"),
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        verbose_name=_("Frais recharge Alipay / WeChat Pay (%)"),
     )
 
     # --- Adresse entrepôt Chine (globale, affiché sur tous les profils clients) ---

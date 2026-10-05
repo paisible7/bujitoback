@@ -91,8 +91,10 @@ def parcel_shipping_category(parcel) -> str:
     raw = (getattr(parcel, "description", None) or "").strip().lower()
     if not raw:
         return "ordinary"
-    if raw in {"ordinary", "sensitive", "phone", "express"}:
+    if raw in {"ordinary", "sensitive", "phone", "computer", "express"}:
         return raw
+    if any(k in raw for k in ("ordinateur", "computer", "laptop", "notebook")):
+        return "computer"
     if any(k in raw for k in ("téléphone", "telephone", "phone")):
         return "phone"
     if any(k in raw for k in ("sensible", "sensitive")):
@@ -105,9 +107,9 @@ def parcel_shipping_category(parcel) -> str:
 
 
 def parcels_shipping_category(parcels: list) -> str:
-    """Priorité : phone > sensitive > express > ordinary."""
+    """Priorité : computer > phone > sensitive > express > ordinary."""
     cats = {parcel_shipping_category(p) for p in parcels}
-    for key in ("phone", "sensitive", "express", "ordinary"):
+    for key in ("computer", "phone", "sensitive", "express", "ordinary"):
         if key in cats:
             return key
     return "ordinary"
@@ -203,15 +205,23 @@ def build_expedition_quote(
             category = parcels_shipping_category(parcels)
             requested = (shipping_category or "").strip().lower()
             # Admin peut encore forcer une catégorie via l'API si besoin.
-            if requested in {"ordinary", "sensitive", "phone", "express"}:
+            if requested in {"ordinary", "sensitive", "phone", "computer", "express"}:
                 category = requested
-            if category not in {"ordinary", "sensitive", "phone", "express"}:
+            if category not in {"ordinary", "sensitive", "phone", "computer", "express"}:
                 category = "ordinary"
-            if weight <= 0 and category != "phone":
+            if weight <= 0 and category not in {"phone", "computer"}:
                 raise ValueError(
                     "Poids du colis manquant : impossible de calculer le tarif avion."
                 )
-            ship = shipping_cost(category=category, weight_kg=weight, settings=cfg)
+            computer_quantity = sum(
+                1 for parcel in parcels if parcel_shipping_category(parcel) == "computer"
+            )
+            ship = shipping_cost(
+                category=category,
+                weight_kg=weight,
+                quantity=(computer_quantity or len(parcels)) if category == "computer" else 1,
+                settings=cfg,
+            )
             if not ship.get("available", True):
                 raise ValueError(ship.get("message") or "catégorie indisponible")
             shipping_fee_full = _to_decimal(ship["amount_usd"])

@@ -2,6 +2,8 @@ from django.urls import path
 
 from .views import (
     AdminAccountingExportView,
+    AdminAccountingExpenseDetailView,
+    AdminAccountingExpensesView,
     AdminAccountingView,
     AdminClientServiceView,
     AdminStatsView,
@@ -10,6 +12,16 @@ from .views import (
 urlpatterns = [
     path('stats/', AdminStatsView.as_view(), name='admin-stats'),
     path('accounting/', AdminAccountingView.as_view(), name='admin-accounting'),
+    path(
+        'accounting/expenses/',
+        AdminAccountingExpensesView.as_view(),
+        name='admin-accounting-expenses',
+    ),
+    path(
+        'accounting/expenses/<int:pk>/',
+        AdminAccountingExpenseDetailView.as_view(),
+        name='admin-accounting-expense-detail',
+    ),
     path(
         'accounting/export.csv',
         AdminAccountingExportView.as_view(),

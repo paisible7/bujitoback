@@ -17,6 +17,14 @@ from .serializers import (
 )
 
 
+def _uploaded_ad_image(request):
+    for field in ('image', 'photo', 'advertisement_image'):
+        uploaded = request.FILES.get(field)
+        if uploaded is not None:
+            return uploaded
+    return None
+
+
 class AdvertisementListView(generics.ListAPIView):
     """Liste des affiches actives (clients + admin)."""
 
@@ -50,8 +58,9 @@ class AdvertisementCreateView(APIView):
 
     def post(self, request):
         data = _as_plain_dict(request.data)
-        if request.FILES.get('image'):
-            data['image'] = request.FILES.get('image')
+        uploaded_image = _uploaded_ad_image(request)
+        if uploaded_image is not None:
+            data['image'] = uploaded_image
         if 'is_active' in data and isinstance(data.get('is_active'), str):
             data['is_active'] = data.get('is_active').lower() in (
                 '1', 'true', 'yes', 'on',
@@ -91,8 +100,9 @@ class AdvertisementDetailView(APIView):
         if ad is None:
             return Response({'detail': 'Introuvable.'}, status=status.HTTP_404_NOT_FOUND)
         data = _as_plain_dict(request.data)
-        if request.FILES.get('image'):
-            data['image'] = request.FILES.get('image')
+        uploaded_image = _uploaded_ad_image(request)
+        if uploaded_image is not None:
+            data['image'] = uploaded_image
         if 'is_active' in data and isinstance(data.get('is_active'), str):
             data['is_active'] = data.get('is_active').lower() in (
                 '1', 'true', 'yes', 'on',

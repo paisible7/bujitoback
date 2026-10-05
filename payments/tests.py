@@ -6,6 +6,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient, APITestCase
 
 from parcels.models import Order
+from pricing.models import BusinessSettings
 from users.models import CustomUser
 
 from .models import Payment, PaymentMethod
@@ -144,6 +145,63 @@ class PaymentInitiationTests(APITestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Payment.objects.filter(order=order).exists())
+
+    def test_alipay_and_wechat_recharges_apply_the_configured_fee(self):
+        settings = BusinessSettings.load()
+        settings.alipay_wechat_recharge_fee_percent = Decimal("15.87")
+        settings.save(update_fields=["alipay_wechat_recharge_fee_percent"])
+
+        for provider in ("alipay", "wechat"):
+            with self.subTest(provider=provider):
+                response = self.client.post(
+                    reverse("payment-initiate"),
+                    {
+                        "type": "money_transfer",
+                        "method": "card",
+                        "amount": "100.00",
+                        "currency": "USD",
+                        "beneficiary_name": "Client recharge",
+                        "beneficiary_phone": "+243800000001",
+                        "purpose": "alipay_recharge",
+                        "qr_provider": provider,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200, response.data)
+                transaction = Payment.objects.get(pk=response.data["transaction"]["id"])
+                self.assertEqual(transaction.amount, Decimal("115.87"))
+                self.assertEqual(
+                    transaction.provider_raw_response["recharge_amount"],
+                    "100.00",
+                )
+                self.assertEqual(
+                    transaction.provider_raw_response["recharge_fee"],
+                    "15.87",
+                )
+                self.assertEqual(
+                    response.data["transaction"]["recharge_fee_rate"],
+                    "15.87",
+                )
+
+    def test_regular_transfers_do_not_receive_the_recharge_fee(self):
+        response = self.client.post(
+            reverse("payment-initiate"),
+            {
+                "type": "money_transfer",
+                "method": "card",
+                "amount": "100.00",
+                "currency": "USD",
+                "beneficiary_name": "Agent transfer",
+                "beneficiary_phone": "+243800000001",
+                "purpose": "agent_transfer",
+                "qr_provider": "wechat",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        transaction = Payment.objects.get(pk=response.data["transaction"]["id"])
+        self.assertEqual(transaction.amount, Decimal("100.00"))
+        self.assertNotIn("recharge_fee", transaction.provider_raw_response)
 
 
 class PaymentCompletionSignalTests(TransactionTestCase):

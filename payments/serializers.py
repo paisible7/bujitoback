@@ -35,6 +35,9 @@ class PaymentSerializer(serializers.ModelSerializer):
     note = serializers.SerializerMethodField()
     purpose = serializers.SerializerMethodField()
     qr_provider = serializers.SerializerMethodField()
+    recharge_amount = serializers.SerializerMethodField()
+    recharge_fee = serializers.SerializerMethodField()
+    recharge_fee_rate = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
@@ -61,6 +64,9 @@ class PaymentSerializer(serializers.ModelSerializer):
             'note',
             'purpose',
             'qr_provider',
+            'recharge_amount',
+            'recharge_fee',
+            'recharge_fee_rate',
         ]
         read_only_fields = [
             'reference',
@@ -123,3 +129,12 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     def get_purpose(self, obj):
         return (_payment_meta(obj).get('purpose') or '').strip() or None
+
+    def get_recharge_amount(self, obj):
+        return _payment_meta(obj).get('recharge_amount')
+
+    def get_recharge_fee(self, obj):
+        return _payment_meta(obj).get('recharge_fee')
+
+    def get_recharge_fee_rate(self, obj):
+        return _payment_meta(obj).get('recharge_fee_rate')

@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.conf import settings
 from django.db import transaction
@@ -13,6 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from parcels.models import Order, ExpeditionRequest
+from pricing.models import BusinessSettings
 
 from .models import PaymentMethod, Payment, SavedPaymentMethod
 from .serializers import (
@@ -239,10 +241,10 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         transfer_currency = "FCFA"
         if is_transfer:
             try:
-                amount = float(request.data.get("amount"))
-            except (TypeError, ValueError):
+                amount = Decimal(str(request.data.get("amount")).replace(",", "."))
+            except (InvalidOperation, TypeError, ValueError):
                 return Response({"message": "amount is required"}, status=status.HTTP_400_BAD_REQUEST)
-            if amount <= 0:
+            if not amount.is_finite() or amount <= 0:
                 return Response({"message": "amount must be positive"}, status=status.HTTP_400_BAD_REQUEST)
 
             raw_currency = (request.data.get("currency") or "FCFA").strip().upper()
@@ -279,6 +281,22 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            recharge_amount = amount
+            recharge_fee = Decimal("0.00")
+            if transfer_purpose == "alipay_recharge":
+                qr_provider = qr_provider or "alipay"
+                if qr_provider not in {"alipay", "wechat"}:
+                    return Response(
+                        {"message": "qr_provider must be alipay or wechat for a recharge"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                fee_rate = BusinessSettings.load().alipay_wechat_recharge_fee_percent
+                recharge_fee = (recharge_amount * fee_rate / Decimal("100")).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+                amount = recharge_amount + recharge_fee
+
             meta = {
                 "type": "money_transfer",
                 "beneficiary_name": beneficiary_name,
@@ -289,6 +307,12 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             }
             if qr_provider in ("alipay", "wechat"):
                 meta["qr_provider"] = qr_provider
+            if transfer_purpose == "alipay_recharge":
+                meta.update({
+                    "recharge_amount": str(recharge_amount),
+                    "recharge_fee": str(recharge_fee),
+                    "recharge_fee_rate": str(fee_rate),
+                })
             if qr_image is not None:
                 meta["has_qr_image"] = True
         elif is_expedition:

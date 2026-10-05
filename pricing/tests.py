@@ -35,6 +35,16 @@ class ShippingCostTests(TestCase):
         result = shipping_cost(category="phone", settings=self.cfg)
         self.assertEqual(result["amount_usd"], 36.0)
 
+    def test_computer_flat_fee_is_per_piece_without_weight(self):
+        result = shipping_cost(
+            category="computer",
+            quantity=3,
+            settings=self.cfg,
+        )
+        self.assertEqual(result["amount_usd"], 300.0)
+        self.assertEqual(result["days"], None)
+        self.assertIn("3 × forfait ordinateur", result["detail"])
+
     def test_express_unavailable(self):
         result = shipping_cost(category="express", weight_kg="1", settings=self.cfg)
         self.assertFalse(result["available"])
@@ -102,6 +112,18 @@ class PricingApiTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["billable_kg"], 0.5)
         self.assertEqual(response.data["amount_usd"], 8.5)
+
+    def test_estimate_computer_flat_fee_by_quantity(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.post(
+            "/api/pricing/estimate/",
+            {"kind": "shipping", "category": "computer", "quantity": 2},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["category"], "computer")
+        self.assertEqual(response.data["amount_usd"], 200.0)
 
     def test_admin_can_patch_air_and_sea_addresses(self):
         self.client.force_authenticate(self.admin)

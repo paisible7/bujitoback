@@ -35,20 +35,27 @@ def shipping_cost(
     *,
     category: str,
     weight_kg=None,
+    quantity: int = 1,
     settings: BusinessSettings | None = None,
 ) -> dict[str, Any]:
     """
-    category: ordinary | express | sensitive | phone
+    category: ordinary | express | sensitive | phone | computer
     """
     cfg = settings or BusinessSettings.load()
     cat = (category or "ordinary").strip().lower()
     billable = billable_weight_kg(weight_kg)
+    pieces = max(1, int(quantity or 1))
 
     if cat == "phone":
         amount = cfg.phone_flat_fee
         days = cfg.phone_days
         available = True
         detail = "forfait téléphone"
+    elif cat == "computer":
+        amount = (cfg.computer_flat_fee * pieces).quantize(Decimal("0.01"))
+        days = None
+        available = True
+        detail = f"{pieces} × forfait ordinateur à {cfg.computer_flat_fee} $/pièce"
     elif cat == "express":
         available = bool(cfg.express_available)
         days = cfg.express_days

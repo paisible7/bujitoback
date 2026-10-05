@@ -400,6 +400,7 @@ class ExpeditionRequest(models.Model):
         ('express', _('Express (colis ordinaire)')),
         ('sensitive', _('Colis sensibles')),
         ('phone', _('Téléphone')),
+        ('computer', _('Ordinateur')),
     ]
     STATUS_CHOICES = [
         ('quoted', _('En attente frais transfert')),
