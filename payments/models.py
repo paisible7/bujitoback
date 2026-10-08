@@ -2,8 +2,10 @@ from django.db import models
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
+from core.models import PublicUUIDModel
 
-class SavedPaymentMethod(models.Model):
+
+class SavedPaymentMethod(PublicUUIDModel):
     """
     User-saved payment method metadata.
     Never store card PAN/CVV here. For cards, store only provider token/last4.
@@ -31,7 +33,7 @@ class SavedPaymentMethod(models.Model):
         return f"{self.user} - {self.type} - {self.label}"
 
 
-class PaymentMethod(models.Model):
+class PaymentMethod(PublicUUIDModel):
     name = models.CharField(max_length=100, verbose_name=_("Nom"))
     code = models.CharField(max_length=50, unique=True, verbose_name=_("Code"))  # e.g., 'orange_money', 'wave', 'card'
     is_active = models.BooleanField(default=True, verbose_name=_("Actif"))
@@ -45,7 +47,7 @@ class PaymentMethod(models.Model):
         return self.name
 
 
-class Payment(models.Model):
+class Payment(PublicUUIDModel):
     STATUS_CHOICES = (
         ('pending', _('En attente')),
         ('completed', _('Terminé')),

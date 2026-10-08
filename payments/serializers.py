@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from core.serializers import PublicUUIDSerializerMixin
 from parcels.media_urls import absolute_media_url
 from .models import PaymentMethod, Payment, SavedPaymentMethod
 
@@ -8,20 +9,20 @@ def _payment_meta(obj):
     return raw if isinstance(raw, dict) else {}
 
 
-class SavedPaymentMethodSerializer(serializers.ModelSerializer):
+class SavedPaymentMethodSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = SavedPaymentMethod
         fields = ['id', 'type', 'label', 'last_four', 'phone_number', 'is_default']
         read_only_fields = ['id']
 
 
-class PaymentMethodSerializer(serializers.ModelSerializer):
+class PaymentMethodSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = PaymentMethod
         fields = ['id', 'name', 'code', 'is_active', 'icon_url']
 
 
-class PaymentSerializer(serializers.ModelSerializer):
+class PaymentSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     method = serializers.SerializerMethodField()
     redirect_url = serializers.ReadOnlyField(source='payment_url')
     user_email = serializers.SerializerMethodField()

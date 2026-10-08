@@ -99,6 +99,47 @@ class OrderPhotoUploadTests(TestCase):
                 self.assertEqual(order.images.count(), 2)
                 self.assertTrue(all(image.image.storage.exists(image.image.name) for image in order.images.all()))
 
+    def test_order_creation_with_packages_and_photos(self):
+        """Mimique l'envoi Flutter: packages JSON + images multipart."""
+        import json
+
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                packages = json.dumps(
+                    [
+                        {
+                            "description": "Produit sur photo",
+                            "comment": "Produit sur photo",
+                            "links": [],
+                        }
+                    ]
+                )
+                response = self.client.post(
+                    reverse("order-list-create"),
+                    {
+                        "client_name": "Photo Client",
+                        "city": "Kinshasa",
+                        "country": "CD",
+                        "packages": packages,
+                        "expected_parcel_count": "1",
+                        "quantity": "1",
+                        "image_package_indexes": "0",
+                        "images": self._image("package-photo.jpg"),
+                    },
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, 201, response.data)
+                order = Order.objects.get(pk=response.data["id"])
+                self.assertEqual(order.images.count(), 1)
+                self.assertEqual(order.images.first().package_index, 0)
+                self.assertEqual(order.expected_parcel_count, 1)
+                self.assertTrue(
+                    order.images.first().image.storage.exists(
+                        order.images.first().image.name
+                    )
+                )
+
 
 class ComputerExpeditionPricingTests(TestCase):
     def test_computer_parcels_are_charged_per_piece_without_weight(self):

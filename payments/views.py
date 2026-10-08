@@ -13,6 +13,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
+from core.serializers import UUIDLookupMixin, resolve_uuid_or_pk
 from parcels.models import Order, ExpeditionRequest
 from pricing.models import BusinessSettings
 
@@ -149,7 +150,7 @@ def _verify_webhook_signature(request) -> bool:
     return hmac.compare_digest(mac, sig)
 
 
-class SavedPaymentMethodViewSet(viewsets.ModelViewSet):
+class SavedPaymentMethodViewSet(UUIDLookupMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = SavedPaymentMethodSerializer
 
@@ -196,7 +197,7 @@ class SavedPaymentMethodViewSet(viewsets.ModelViewSet):
         return Response(out.data, status=status.HTTP_201_CREATED)
 
 
-class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
+class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
     queryset = Payment.objects.all()
     serializer_class = PaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -323,11 +324,11 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             try:
-                expedition = ExpeditionRequest.objects.get(
-                    pk=int(expedition_id),
-                    user=request.user,
+                expedition = resolve_uuid_or_pk(
+                    ExpeditionRequest.objects.filter(user=request.user),
+                    expedition_id,
                 )
-            except Exception:
+            except ExpeditionRequest.DoesNotExist:
                 return Response(
                     {"message": "Expedition not found"},
                     status=status.HTTP_404_NOT_FOUND,
@@ -358,8 +359,11 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             if not order_id:
                 return Response({"message": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST)
             try:
-                order = Order.objects.get(pk=int(order_id), user=request.user)
-            except Exception:
+                order = resolve_uuid_or_pk(
+                    Order.objects.filter(user=request.user),
+                    order_id,
+                )
+            except Order.DoesNotExist:
                 return Response({"message": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
 
             if order.status.lower() not in {"pending", "processing"}:
@@ -382,9 +386,12 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if method_code in {"orange_money", "mtn_momo", "wave", "moov"} and not phone_number:
             if saved_method_id:
                 try:
-                    saved = SavedPaymentMethod.objects.get(pk=int(saved_method_id), user=request.user)
+                    saved = resolve_uuid_or_pk(
+                        SavedPaymentMethod.objects.filter(user=request.user),
+                        saved_method_id,
+                    )
                     phone_number = (saved.phone_number or "").strip()
-                except Exception:
+                except SavedPaymentMethod.DoesNotExist:
                     return Response({"message": "Invalid saved_method_id"}, status=status.HTTP_400_BAD_REQUEST)
             if not phone_number:
                 return Response({"message": "phone_number is required"}, status=status.HTTP_400_BAD_REQUEST)

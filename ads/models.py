@@ -1,6 +1,10 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
+from core.models import PublicUUIDModel
+
+from core.models import PublicUUIDModel
+
 
 # Écrans client où une affiche peut apparaître.
 AD_SCREEN_CHOICES = (
@@ -17,7 +21,7 @@ AD_SCREEN_CHOICES = (
 AD_SCREEN_KEYS = {key for key, _ in AD_SCREEN_CHOICES}
 
 
-class Advertisement(models.Model):
+class Advertisement(PublicUUIDModel):
     """Affiche publicitaire affichée en modal sur les écrans choisis."""
 
     title = models.CharField(max_length=200, blank=True, default='', verbose_name=_('Titre'))

@@ -2,7 +2,9 @@ from django.db import models
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
-class FCMDevice(models.Model):
+from core.models import PublicUUIDModel
+
+class FCMDevice(PublicUUIDModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='devices', verbose_name=_("Utilisateur"))
     token = models.TextField(unique=True, verbose_name=_("Token"))
     platform = models.CharField(
@@ -20,12 +22,18 @@ class FCMDevice(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.platform}"
 
-class Notification(models.Model):
+class Notification(PublicUUIDModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='notifications', verbose_name=_("Utilisateur"))
     title = models.CharField(max_length=255, verbose_name=_("Titre"))
     message = models.TextField(verbose_name=_("Message"))
     type = models.CharField(max_length=50, default='general', verbose_name=_("Type"))
-    reference_id = models.IntegerField(null=True, blank=True, verbose_name=_("ID de référence"))
+    # Accepte int legacy ou UUID public de l'entité liée.
+    reference_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        verbose_name=_("ID de référence"),
+    )
     image = models.ImageField(
         upload_to='notifications/',
         null=True,

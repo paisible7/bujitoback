@@ -11,7 +11,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django.db import transaction # Pour les opérations atomiques
 from django.db.models import Prefetch
 from django.http import Http404
-from .models import Order, Parcel, Consolidation, OrderImage, ImportBatch, ShipmentBatch, ExpeditionRequest
+from .models import Order, Parcel, ParcelImage, Consolidation, OrderImage, ImportBatch, ShipmentBatch, ExpeditionRequest
 from .serializers import (
     OrderSerializer,
     ParcelSerializer,
@@ -36,13 +36,149 @@ from users.roles import is_app_admin
 from users.models import CustomUser
 from notifications.utils import notify_admins, send_fcm_notification
 from .pagination import OptionalPageNumberPagination
+from core.serializers import UUIDLookupMixin, resolve_uuid_or_pk
 
 
 def _order_image_uploads(request):
-    uploads = []
-    for field in ('images', 'images[]', 'image'):
-        uploads.extend(request.FILES.getlist(field))
-    return uploads
+    from core.media import collect_uploads, normalize_image_uploads
+
+    uploads = collect_uploads(request, ('images', 'images[]', 'image'))
+    if not uploads:
+        return []
+    return normalize_image_uploads(uploads, prefix='order')
+
+
+def _parse_keep_image_refs(order, keep_raw):
+    """Accepte pk int ou UUID public pour keep_image_ids."""
+    import uuid as uuid_lib
+
+    refs = []
+    if isinstance(keep_raw, str) and keep_raw.strip():
+        parts = [p.strip() for p in keep_raw.split(',') if p.strip()]
+    elif isinstance(keep_raw, list):
+        parts = [str(p).strip() for p in keep_raw if str(p).strip()]
+    else:
+        return []
+
+    for part in parts:
+        try:
+            uid = uuid_lib.UUID(part)
+            img = order.images.filter(uuid=uid).first()
+            if img:
+                refs.append(img.pk)
+                continue
+        except (ValueError, TypeError, AttributeError):
+            pass
+        try:
+            refs.append(int(part))
+        except (TypeError, ValueError):
+            continue
+    return refs
+
+
+def _parcel_extra_image_uploads(request):
+    from core.media import collect_uploads, normalize_image_uploads
+
+    uploads = collect_uploads(
+        request,
+        (
+            'extra_images',
+            'extra_images[]',
+            'images',
+            'images[]',
+            'package_photos',
+            'package_photos[]',
+        ),
+    )
+    if not uploads:
+        return []
+    return normalize_image_uploads(uploads, prefix='parcel')
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _parse_int_list(raw):
+    if raw is None:
+        return None
+    ids = []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        for part in text.split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ids.append(int(part))
+            except ValueError:
+                continue
+        return ids
+    if isinstance(raw, list):
+        for item in raw:
+            try:
+                ids.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return ids
+    return []
+
+
+def _sync_parcel_images(parcel: Parcel, request) -> None:
+    """
+    Sync images pour un colis.
+    Le serializer retourne des URLs (read-only), donc on applique les fichiers ici.
+
+    Champs acceptes:
+    - image / package_photo: remplace la photo principale.
+    - extra_images / images / package_photos (+ variantes []): ajoute des photos.
+    - keep_extra_image_ids: si fourni, supprime les extra images non listees.
+    - replace_extra_images: si true, supprime toutes les extra images avant ajout.
+    """
+    from core.media import normalize_image_upload
+
+    main = request.FILES.get('image') or request.FILES.get('package_photo')
+    extras = list(_parcel_extra_image_uploads(request))
+
+    if main is None and not getattr(parcel, 'image', None) and extras:
+        # Si le front envoie tout dans "images", prendre la 1ere en principal.
+        main = extras.pop(0)
+
+    if main is not None:
+        try:
+            main = normalize_image_upload(main, prefix='parcel_main')
+        except Exception:
+            pass
+        parcel.image = main
+        parcel.save(update_fields=['image', 'last_updated'])
+
+    keep_ids = _parse_int_list(request.data.get('keep_extra_image_ids', None))
+    replace = _truthy(request.data.get('replace_extra_images', False))
+
+    if keep_ids is not None:
+        parcel.extra_images.exclude(id__in=keep_ids).delete()
+    elif replace:
+        parcel.extra_images.all().delete()
+
+    if extras:
+        current_max = (
+            parcel.extra_images.order_by('-sort_order').values_list('sort_order', flat=True).first()
+            or 0
+        )
+        sort_order = int(current_max) + 1
+        for uploaded in extras:
+            ParcelImage.objects.create(
+                parcel=parcel,
+                image=uploaded,
+                sort_order=sort_order,
+            )
+            sort_order += 1
 
 
 class OrderListCreateView(generics.ListCreateAPIView):
@@ -87,7 +223,6 @@ class OrderListCreateView(generics.ListCreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
 
         # Photos produit : champ "images" + index colis optionnel "image_package_indexes"
         indexes_raw = request.data.get('image_package_indexes', '')
@@ -109,20 +244,40 @@ class OrderListCreateView(generics.ListCreateAPIView):
                     index_list.append(0)
 
         uploads = _order_image_uploads(request)
-        for i, uploaded in enumerate(uploads):
-            pkg_index = index_list[i] if i < len(index_list) else 0
-            OrderImage.objects.create(
-                order=serializer.instance,
-                image=uploaded,
-                package_index=pkg_index,
+
+        try:
+            with transaction.atomic():
+                self.perform_create(serializer)
+                for i, uploaded in enumerate(uploads):
+                    pkg_index = index_list[i] if i < len(index_list) else 0
+                    OrderImage.objects.create(
+                        order=serializer.instance,
+                        image=uploaded,
+                        package_index=pkg_index,
+                    )
+        except Exception as exc:
+            return Response(
+                {
+                    'detail': (
+                        "Impossible d'enregistrer la commande avec les photos. "
+                        f"{exc}"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+        order = serializer.instance
+        order.refresh_from_db()
         headers = self.get_success_headers(serializer.data)
-        full_serializer = OrderSerializer(serializer.instance, context={'request': request})
-        return Response(full_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        full_serializer = OrderSerializer(order, context={'request': request})
+        return Response(
+            full_serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
 
 
-class OrderDetailView(generics.RetrieveUpdateAPIView):
+class OrderDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, FormParser, MultiPartParser]
@@ -172,23 +327,7 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
         if keep_raw is None and not uploads:
             return
 
-        keep_ids = []
-        if keep_raw is not None:
-            if isinstance(keep_raw, str) and keep_raw.strip():
-                for part in keep_raw.split(','):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    try:
-                        keep_ids.append(int(part))
-                    except ValueError:
-                        continue
-            elif isinstance(keep_raw, list):
-                for part in keep_raw:
-                    try:
-                        keep_ids.append(int(part))
-                    except (TypeError, ValueError):
-                        continue
+        keep_ids = _parse_keep_image_refs(order, keep_raw) if keep_raw is not None else []
 
         if keep_raw is not None:
             order.images.exclude(id__in=keep_ids).delete()
@@ -196,6 +335,9 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
             order.images.all().delete()
 
         # Remap package_index des images conservées (édition multi-colis)
+        # Format: "<uuid|pk>:<package_index>,..."
+        import uuid as uuid_lib
+
         remap_raw = request.data.get('keep_image_package_indexes', '')
         if isinstance(remap_raw, str) and remap_raw.strip():
             for part in remap_raw.split(','):
@@ -204,11 +346,20 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
                     continue
                 id_s, pkg_s = part.split(':', 1)
                 try:
-                    img_id = int(id_s.strip())
                     pkg_i = max(0, int(pkg_s.strip()))
                 except ValueError:
                     continue
-                order.images.filter(id=img_id).update(package_index=pkg_i)
+                key = id_s.strip()
+                try:
+                    uid = uuid_lib.UUID(key)
+                    order.images.filter(uuid=uid).update(package_index=pkg_i)
+                    continue
+                except (ValueError, TypeError, AttributeError):
+                    pass
+                try:
+                    order.images.filter(id=int(key)).update(package_index=pkg_i)
+                except (TypeError, ValueError):
+                    continue
 
         indexes_raw = request.data.get('image_package_indexes', '')
         index_list = []
@@ -247,6 +398,8 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
             )
             serializer.is_valid(raise_exception=True)
             order = serializer.save()
+            self._sync_order_images(order, request)
+            order.refresh_from_db()
             return Response(
                 OrderSerializer(order, context={'request': request}).data
             )
@@ -281,6 +434,7 @@ class OrderDetailView(generics.RetrieveUpdateAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         self.perform_update(serializer)
+        self._sync_order_images(serializer.instance, request)
         if serializer_class is OrderSerializer and instance.parcels.exists():
             instance.refresh_from_db()
         return Response(OrderSerializer(instance, context={'request': request}).data)
@@ -542,6 +696,8 @@ class ParcelListCreateView(generics.ListCreateAPIView):
                 {"detail": f"Erreur d'enregistrement : {exc}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        _sync_parcel_images(parcel, request)
         return Response(
             ParcelSerializer(parcel, context={'request': request}).data,
             status=status.HTTP_201_CREATED,
@@ -578,6 +734,7 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
         from datetime import date
         old_status = serializer.instance.status
         parcel = serializer.save()
+        _sync_parcel_images(parcel, self.request)
         # Marquage arrivée entrepôt → date Chine si absente
         if (
             old_status != 'pending'
@@ -760,7 +917,7 @@ class ConsolidationBulkStatusView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-class ConsolidationDetailView(generics.RetrieveUpdateAPIView):
+class ConsolidationDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
     serializer_class = ConsolidationSerializer
     permission_classes = [IsAuthenticated]
     queryset = Consolidation.objects.prefetch_related(
@@ -1635,7 +1792,10 @@ class ExpeditionDetailView(APIView):
 
     def get_object(self, pk, user):
         try:
-            exp = ExpeditionRequest.objects.prefetch_related('parcels').get(pk=pk)
+            exp = resolve_uuid_or_pk(
+                ExpeditionRequest.objects.prefetch_related('parcels'),
+                pk,
+            )
         except ExpeditionRequest.DoesNotExist:
             return None
         if not is_app_admin(user) and exp.user_id != user.id:
@@ -1935,7 +2095,7 @@ class ShipmentBatchDetailView(APIView):
 
     def get_object(self, pk):
         try:
-            return _shipment_batch_qs().get(pk=pk)
+            return resolve_uuid_or_pk(_shipment_batch_qs(), pk)
         except ShipmentBatch.DoesNotExist:
             return None
 
@@ -2022,4 +2182,3 @@ class ShipmentBatchBulkStatusView(APIView):
             "missing": missing,
             "status": new_status,
         }, status=status.HTTP_200_OK)
-

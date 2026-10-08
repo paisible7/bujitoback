@@ -1,0 +1,36 @@
+node_modules/
+dist/
+build/
+*.log
+package-lock.json
+*.svg
+
+# Django
+*.log
+*.pyc
+__pycache__/
+
+# Base de données locale (SQLite)
+db.sqlite3
+db.sqlite3-*
+*.sqlite3
+*.db
+
+media/
+static/
+staticfiles/
+
+# Environnement et Secrets
+.env
+venv/
+env/
+ENV/
+firebase-service-account.json
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

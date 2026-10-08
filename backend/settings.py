@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'corsheaders',
 
     # Local apps
+    'core.apps.CoreConfig',
     'users',
     'parcels.apps.ParcelsConfig',
     'notifications',

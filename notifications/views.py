@@ -1,6 +1,7 @@
 from rest_framework import viewsets, status, decorators
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from core.serializers import UUIDLookupMixin
 from .models import Notification, FCMDevice
 from .serializers import NotificationSerializer, AdminSendNotificationSerializer
 from .utils import send_fcm_notification
@@ -28,7 +29,7 @@ def _as_plain_dict(data):
     return dict(data) if not isinstance(data, dict) else dict(data)
 
 
-class NotificationViewSet(viewsets.ModelViewSet):
+class NotificationViewSet(UUIDLookupMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = NotificationSerializer
 

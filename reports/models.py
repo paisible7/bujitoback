@@ -3,8 +3,10 @@ from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
+from core.models import PublicUUIDModel
 
-class Expense(models.Model):
+
+class Expense(PublicUUIDModel):
     name = models.CharField(max_length=200, verbose_name=_('Bénéficiaire'))
     category = models.CharField(max_length=100, verbose_name=_('Catégorie'))
     description = models.TextField(blank=True, default='', verbose_name=_('Description'))

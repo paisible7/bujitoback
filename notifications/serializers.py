@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from django.contrib.auth import get_user_model
 
+from core.serializers import PublicUUIDSerializerMixin
 from .models import Notification
 from .text_sanitizer import strip_emojis
 from parcels.media_urls import absolute_media_url
@@ -9,7 +10,7 @@ from parcels.media_urls import absolute_media_url
 User = get_user_model()
 
 
-class NotificationSerializer(serializers.ModelSerializer):
+class NotificationSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
 
     def get_image(self, obj):

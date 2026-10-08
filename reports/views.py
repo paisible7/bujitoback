@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework.views import APIView
 
+from core.serializers import UUIDLookupMixin
 from parcels.models import Order, Parcel
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 from payments.models import Payment
@@ -481,7 +482,7 @@ class AdminAccountingExpensesView(generics.ListCreateAPIView):
         return _accounting_expenses(self.request)
 
 
-class AdminAccountingExpenseDetailView(generics.RetrieveUpdateDestroyAPIView):
+class AdminAccountingExpenseDetailView(UUIDLookupMixin, generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
     serializer_class = ExpenseSerializer
     queryset = Expense.objects.select_related('client', 'recorded_by')

@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from core.serializers import PublicUUIDSerializerMixin
 from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage, ShipmentBatch, ExpeditionRequest
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
@@ -14,7 +15,7 @@ from .quote_utils import (
     reconstruct_packages,
 )
 
-class ParcelSerializer(serializers.ModelSerializer):
+class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     package_photo = serializers.SerializerMethodField()
     package_photos = serializers.SerializerMethodField()
@@ -62,7 +63,9 @@ class ParcelSerializer(serializers.ModelSerializer):
 
     def get_group_id(self, obj):
         group = obj.consolidations.filter(status='completed').order_by('-request_date').first()
-        return group.pk if group else None
+        if not group:
+            return None
+        return str(group.uuid) if getattr(group, 'uuid', None) else group.pk
 
     def get_mco_code(self, obj):
         batches = list(obj.shipment_batches.all())
@@ -106,7 +109,9 @@ class ParcelSerializer(serializers.ModelSerializer):
 
     def get_pending_expedition_id(self, obj):
         exp = self._pending_expedition(obj)
-        return exp.pk if exp else None
+        if not exp:
+            return None
+        return str(exp.uuid) if getattr(exp, 'uuid', None) else exp.pk
 
     def get_pending_expedition_status(self, obj):
         exp = self._pending_expedition(obj)
@@ -194,7 +199,7 @@ class ParcelSerializer(serializers.ModelSerializer):
         return urls[0] if urls else None
 
 
-class ShipmentBatchSerializer(serializers.ModelSerializer):
+class ShipmentBatchSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     parcel_count = serializers.SerializerMethodField()
     tracking_numbers = serializers.SerializerMethodField()
     admin_photo_url = serializers.SerializerMethodField()
@@ -300,7 +305,7 @@ class ShipmentBatchSerializer(serializers.ModelSerializer):
         return clients
 
 
-class ExpeditionRequestSerializer(serializers.ModelSerializer):
+class ExpeditionRequestSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     tracking_numbers = serializers.SerializerMethodField()
     parcel_ids = serializers.SerializerMethodField()
     cbm_fee_remaining = serializers.SerializerMethodField()
@@ -323,17 +328,21 @@ class ExpeditionRequestSerializer(serializers.ModelSerializer):
         return list(obj.parcels.values_list('tracking_number', flat=True))
 
     def get_parcel_ids(self, obj):
-        return list(obj.parcels.values_list('id', flat=True))
+        return [
+            str(u) if u is not None else None
+            for u in obj.parcels.values_list('uuid', flat=True)
+        ]
 
     def get_cbm_fee_remaining(self, obj):
         return float((obj.cbm_fee or 0) - (obj.cbm_fee_advance or 0))
 
-class OrderImageSerializer(serializers.ModelSerializer):
+class OrderImageSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderImage
         fields = ('id', 'image', 'package_index', 'uploaded_at')
+        read_only_fields = ('id',)
 
     def get_image(self, obj):
         return absolute_media_url(
@@ -342,7 +351,8 @@ class OrderImageSerializer(serializers.ModelSerializer):
             label=f'OrderImage #{obj.pk}',
         )
 
-class OrderSerializer(serializers.ModelSerializer):
+
+class OrderSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     parcels = ParcelSerializer(many=True, read_only=True)
     images = OrderImageSerializer(many=True, read_only=True)
     user_email = serializers.EmailField(source='user.email', read_only=True)
@@ -394,7 +404,8 @@ class OrderSerializer(serializers.ModelSerializer):
         image_entries = []
         for img in obj.images.all():
             image_entries.append({
-                'id': img.id,
+                'id': str(img.uuid) if getattr(img, 'uuid', None) else img.id,
+                'pk': img.pk,
                 'image': absolute_media_url(
                     img.image,
                     self.context.get('request'),
@@ -704,7 +715,7 @@ class OrderQuoteSerializer(serializers.Serializer):
 
 from django.utils.translation import gettext as _
 
-class ConsolidationSerializer(serializers.ModelSerializer):
+class ConsolidationSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     created_at = serializers.DateTimeField(source='request_date', read_only=True)
     group_name = serializers.SerializerMethodField()
     user = UserSerializer(read_only=True)

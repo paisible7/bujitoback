@@ -6,6 +6,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.serializers import resolve_uuid_or_pk
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from .models import AD_SCREEN_KEYS, Advertisement
@@ -93,7 +94,10 @@ class AdvertisementDetailView(APIView):
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_object(self, pk):
-        return Advertisement.objects.filter(pk=pk).first()
+        try:
+            return resolve_uuid_or_pk(Advertisement.objects.all(), pk)
+        except Advertisement.DoesNotExist:
+            return None
 
     def patch(self, request, pk):
         ad = self.get_object(pk)

@@ -1,9 +1,10 @@
 from rest_framework import serializers
 
+from core.serializers import PublicUUIDSerializerMixin
 from .models import Expense
 
 
-class ExpenseSerializer(serializers.ModelSerializer):
+class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     client_name = serializers.CharField(
         source='client.full_name',
         read_only=True,

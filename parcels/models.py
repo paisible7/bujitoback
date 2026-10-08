@@ -1,9 +1,10 @@
 from django.db import models
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils.translation import gettext_lazy as _
+from core.models import PublicUUIDModel
 from users.models import CustomUser
 
-class Order(models.Model):
+class Order(PublicUUIDModel):
     STATUS_CHOICES = [
         ('pending', _('En attente')),
         ('processing', _('En traitement')),
@@ -53,7 +54,7 @@ class Order(models.Model):
         return f"Order {self.id} - {self.user.email}"
 
 
-class OrderImage(models.Model):
+class OrderImage(PublicUUIDModel):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='images', verbose_name=_("Commande"))
     image = models.ImageField(upload_to='orders/', verbose_name=_("Image"))
     package_index = models.PositiveSmallIntegerField(
@@ -70,7 +71,7 @@ class OrderImage(models.Model):
         return f"OrderImage {self.id} - Order {self.order_id}"
 
 
-class Parcel(models.Model):
+class Parcel(PublicUUIDModel):
     PARCEL_STATUS_CHOICES = [
         ('awaiting_arrival', _("En attente d'arrivée")),
         ('pending', _("Arrivé à l'entrepôt")),
@@ -148,7 +149,7 @@ class Parcel(models.Model):
         return self.tracking_number or f"Parcel {self.pk}"
 
 
-class ParcelImage(models.Model):
+class ParcelImage(PublicUUIDModel):
     """Photos supplémentaires d'un colis (la photo principale reste Parcel.image)."""
 
     parcel = models.ForeignKey(
@@ -170,7 +171,7 @@ class ParcelImage(models.Model):
         return f"ParcelImage {self.id} - Parcel {self.parcel_id}"
 
 
-class Consolidation(models.Model):
+class Consolidation(PublicUUIDModel):
     CONSOLIDATION_STATUS_CHOICES = [
         ('pending', _('En attente')),
         ('processing', _('En traitement')),
@@ -229,7 +230,7 @@ class Consolidation(models.Model):
         return f"Consolidation {self.id} - {self.user.email}"
 
 
-class ConsolidationNoteImage(models.Model):
+class ConsolidationNoteImage(PublicUUIDModel):
     """Photos jointes à la note admin lors de l'acceptation / refus d'un groupage."""
 
     consolidation = models.ForeignKey(
@@ -253,7 +254,7 @@ class ConsolidationNoteImage(models.Model):
         return f"ConsolidationNoteImage {self.id} - Groupage {self.consolidation_id}"
 
 
-class ConsolidationParcelDecision(models.Model):
+class ConsolidationParcelDecision(PublicUUIDModel):
     """Décision admin par colis au sein d'une demande de groupage."""
 
     DECISION_CHOICES = [
@@ -291,7 +292,7 @@ class ConsolidationParcelDecision(models.Model):
         return f"Groupage #{self.consolidation_id} / colis #{self.parcel_id}: {self.decision}"
 
 
-class ImportBatch(models.Model):
+class ImportBatch(PublicUUIDModel):
     """Historique d'un fichier importé (xlsx / csv / zip)."""
 
     user = models.ForeignKey(
@@ -326,7 +327,7 @@ class ImportBatch(models.Model):
         return f"{self.file_name} ({self.created_at:%Y-%m-%d %H:%M})"
 
 
-class ShipmentBatch(models.Model):
+class ShipmentBatch(PublicUUIDModel):
     """Lot d'expédition MCO (agrégation de colis groupés, 22–46 kg)."""
 
     STATUS_CHOICES = [
@@ -384,7 +385,7 @@ class ShipmentBatch(models.Model):
         return self.code
 
 
-class ExpeditionRequest(models.Model):
+class ExpeditionRequest(PublicUUIDModel):
     """Demande d'expédition (Bujito Digital ou autre transitaire)."""
 
     MODE_CHOICES = [

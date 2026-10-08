@@ -5,6 +5,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
+from core.serializers import PublicUUIDSerializerMixin
 from parcels.media_urls import absolute_media_url
 from .models import AD_SCREEN_KEYS, Advertisement
 
@@ -93,7 +94,7 @@ def _as_plain_dict(data):
     return dict(data)
 
 
-class AdvertisementSerializer(serializers.ModelSerializer):
+class AdvertisementSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     screens = ScreensField(required=False)
     starts_at = serializers.DateTimeField(
