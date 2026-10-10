@@ -11,6 +11,7 @@ from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework.views import APIView
@@ -147,18 +148,18 @@ def _filter_expenses(qs, params):
         qs = qs.filter(name__icontains=name)
     if client:
         qs = qs.filter(
-            Q(client__full_name__icontains=client)
-            | Q(client__email__icontains=client)
-            | Q(client__phone_number__icontains=client)
-        )
+            Q(clients__full_name__icontains=client)
+            | Q(clients__email__icontains=client)
+            | Q(clients__phone_number__icontains=client)
+        ).distinct()
     if search:
         qs = qs.filter(
             Q(name__icontains=search)
             | Q(category__icontains=search)
             | Q(description__icontains=search)
-            | Q(client__full_name__icontains=search)
-            | Q(client__email__icontains=search)
-        )
+            | Q(clients__full_name__icontains=search)
+            | Q(clients__email__icontains=search)
+        ).distinct()
     if amount:
         try:
             qs = qs.filter(amount=Decimal(amount.replace(',', '.')))
@@ -173,7 +174,7 @@ def _filter_expenses(qs, params):
 
 
 def _accounting_expenses(request):
-    qs = Expense.objects.select_related('client', 'recorded_by').all()
+    qs = Expense.objects.select_related('recorded_by').prefetch_related('clients').all()
     start, end = _period_bounds(request)
     if start:
         qs = qs.filter(expense_date__gte=start.date())
@@ -398,6 +399,11 @@ class AdminAccountingView(APIView):
         transactions = PaymentSerializer(
             page_qs, many=True, context={'request': request}
         ).data
+        expense_rows = ExpenseSerializer(
+            expenses.order_by('-expense_date', '-created_at')[:200],
+            many=True,
+            context={'request': request},
+        ).data
 
         return Response(
             {
@@ -415,6 +421,7 @@ class AdminAccountingView(APIView):
                 'by_method': by_method,
                 'financial_summary': _financial_summary(qs, expenses),
                 'expense_count': expenses.count(),
+                'expenses': expense_rows,
                 'count': total_count,
                 'page': page,
                 'page_size': page_size,
@@ -477,6 +484,7 @@ class AdminAccountingExportView(APIView):
 class AdminAccountingExpensesView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
     serializer_class = ExpenseSerializer
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get_queryset(self):
         return _accounting_expenses(self.request)
@@ -485,7 +493,8 @@ class AdminAccountingExpensesView(generics.ListCreateAPIView):
 class AdminAccountingExpenseDetailView(UUIDLookupMixin, generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
     serializer_class = ExpenseSerializer
-    queryset = Expense.objects.select_related('client', 'recorded_by')
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+    queryset = Expense.objects.select_related('recorded_by').prefetch_related('clients')
 
 
 class AdminClientServiceView(APIView):

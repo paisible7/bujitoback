@@ -1,9 +1,13 @@
 from decimal import Decimal
+from io import BytesIO
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.utils import timezone
+from PIL import Image
 from rest_framework.test import APIClient
 
 from payments.models import Payment, PaymentMethod
@@ -123,49 +127,61 @@ class AdminReportsApiTests(TestCase):
 
     def test_accounting_search_and_financial_summary(self):
         self.client.force_authenticate(self.admin)
-        created_expense = self.client.post(
-            '/api/admin/accounting/expenses/',
-            {
-                'name': 'Transporteur',
-                'category': 'Logistique',
-                'amount': '15.00',
-                'currency': 'USD',
-                'expense_date': timezone.localdate().isoformat(),
-                'client': self.client_user.pk,
-            },
-            format='json',
+        image = BytesIO()
+        Image.new('RGB', (8, 8), color=(255, 200, 0)).save(image, format='JPEG')
+        proof = SimpleUploadedFile(
+            'proof.jpg',
+            image.getvalue(),
+            content_type='image/jpeg',
         )
-        self.assertEqual(created_expense.status_code, 201, created_expense.data)
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                created_expense = self.client.post(
+                    '/api/admin/accounting/expenses/',
+                    {
+                        'name': 'Transporteur',
+                        'category': 'Logistique',
+                        'amount': '15.00',
+                        'currency': 'USD',
+                        'expense_date': timezone.localdate().isoformat(),
+                        'clients': str(self.client_user.pk),
+                        'proof_image': proof,
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(
+                    created_expense.status_code, 201, created_expense.data
+                )
 
-        response = self.client.get('/api/admin/accounting/')
-        self.assertEqual(response.status_code, 200)
-        summary = response.json()['financial_summary'][0]
-        self.assertEqual(summary['currency'], 'USD')
-        self.assertEqual(summary['revenue'], 10.0)
-        self.assertEqual(summary['expenses'], 15.0)
-        self.assertEqual(summary['profit'], 0.0)
-        self.assertEqual(summary['loss'], 5.0)
+                response = self.client.get('/api/admin/accounting/')
+                self.assertEqual(response.status_code, 200)
+                summary = response.json()['financial_summary'][0]
+                self.assertEqual(summary['currency'], 'USD')
+                self.assertEqual(summary['revenue'], 10.0)
+                self.assertEqual(summary['expenses'], 15.0)
+                self.assertEqual(summary['profit'], 0.0)
+                self.assertEqual(summary['loss'], 5.0)
 
-        filtered = self.client.get(
-            '/api/admin/accounting/',
-            {
-                'date': timezone.localdate().isoformat(),
-                'name': 'Client Reports',
-                'client': 'Client Reports',
-                'amount': '10',
-            },
-        )
-        self.assertEqual(filtered.status_code, 200)
-        self.assertEqual(filtered.json()['count'], 1)
-        self.assertEqual(filtered.json()['results'][0]['amount'], '10.00')
+                filtered = self.client.get(
+                    '/api/admin/accounting/',
+                    {
+                        'date': timezone.localdate().isoformat(),
+                        'name': 'Client Reports',
+                        'client': 'Client Reports',
+                        'amount': '10',
+                    },
+                )
+                self.assertEqual(filtered.status_code, 200)
+                self.assertEqual(filtered.json()['count'], 1)
+                self.assertEqual(filtered.json()['results'][0]['amount'], '10.00')
 
-        expense_rows = self.client.get(
-            '/api/admin/accounting/expenses/',
-            {'client': 'Client Reports'},
-        )
-        self.assertEqual(expense_rows.status_code, 200)
-        self.assertEqual(len(expense_rows.json()), 1)
-        self.assertEqual(expense_rows.json()[0]['name'], 'Transporteur')
+                expense_rows = self.client.get(
+                    '/api/admin/accounting/expenses/',
+                    {'client': 'Client Reports'},
+                )
+                self.assertEqual(expense_rows.status_code, 200)
+                self.assertEqual(len(expense_rows.json()), 1)
+                self.assertEqual(expense_rows.json()[0]['name'], 'Transporteur')
 
     def test_accounting_pagination_bounds(self):
         self.client.force_authenticate(self.admin)

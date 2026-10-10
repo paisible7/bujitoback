@@ -21,6 +21,16 @@ class PublicUUIDSerializerMixin:
         return data
 
 
+def lookup_optional(queryset, value):
+    """Comme resolve_uuid_or_pk, mais retourne None si absent ou invalide."""
+    if value in (None, ''):
+        return None
+    try:
+        return resolve_uuid_or_pk(queryset, value)
+    except queryset.model.DoesNotExist:
+        return None
+
+
 def resolve_uuid_or_pk(queryset, value):
     """
     Résout un objet par UUID public ou, en secours, par PK entière.

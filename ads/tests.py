@@ -40,5 +40,14 @@ class AdvertisementPhotoUploadTests(TestCase):
                 )
 
                 self.assertEqual(response.status_code, 201, response.data)
-                advertisement = Advertisement.objects.get(pk=response.data["id"])
+                public_id = response.data["id"]
+                advertisement = Advertisement.objects.get(uuid=public_id)
                 self.assertTrue(advertisement.image.storage.exists(advertisement.image.name))
+
+                patch = self.client.patch(
+                    f"/api/ads/{public_id}/",
+                    {"title": "Affiche modifiée"},
+                    format="json",
+                )
+                self.assertEqual(patch.status_code, 200, patch.data)
+                self.assertEqual(patch.data["title"], "Affiche modifiée")

@@ -36,7 +36,7 @@ from users.roles import is_app_admin
 from users.models import CustomUser
 from notifications.utils import notify_admins, send_fcm_notification
 from .pagination import OptionalPageNumberPagination
-from core.serializers import UUIDLookupMixin, resolve_uuid_or_pk
+from core.serializers import UUIDLookupMixin, lookup_optional, resolve_uuid_or_pk
 
 
 def _order_image_uploads(request):
@@ -586,7 +586,7 @@ class ParcelListCreateView(generics.ListCreateAPIView):
             order_sequence = None
         order = None
         if order_id:
-            order = Order.objects.filter(id=order_id).first()
+            order = lookup_optional(Order.objects.all(), order_id)
         elif user:
             order = (
                 Order.objects.filter(
@@ -896,18 +896,13 @@ class ConsolidationBulkStatusView(APIView):
         missing = []
         with transaction.atomic():
             for raw_id in ids:
-                try:
-                    pk = int(raw_id)
-                except (TypeError, ValueError):
-                    missing.append(raw_id)
-                    continue
-                group = Consolidation.objects.filter(pk=pk).first()
+                group = lookup_optional(Consolidation.objects.all(), raw_id)
                 if group is None:
-                    missing.append(pk)
+                    missing.append(raw_id)
                     continue
                 group.status = new_status
                 group.save(update_fields=['status'])
-                updated.append(pk)
+                updated.append(str(group.uuid))
 
         return Response({
             "updated": updated,
@@ -1028,7 +1023,7 @@ class ParcelBulkImportView(APIView):
                     order_sequence = None
                 order = None
                 if order_id:
-                    order = Order.objects.filter(id=order_id).first()
+                    order = lookup_optional(Order.objects.all(), order_id)
                 elif user:
                     # Si on a trouvé un utilisateur, on cherche sa dernière commande en attente
                     order = (
@@ -2163,18 +2158,13 @@ class ShipmentBatchBulkStatusView(APIView):
         missing = []
         with transaction.atomic():
             for raw_id in ids:
-                try:
-                    pk = int(raw_id)
-                except (TypeError, ValueError):
-                    missing.append(raw_id)
-                    continue
-                batch = _shipment_batch_qs().filter(pk=pk).first()
+                batch = lookup_optional(_shipment_batch_qs(), raw_id)
                 if batch is None:
-                    missing.append(pk)
+                    missing.append(raw_id)
                     continue
                 fields = _apply_shipment_batch_status(batch, new_status)
                 batch.save(update_fields=list(dict.fromkeys(fields)))
-                updated.append(pk)
+                updated.append(str(batch.uuid))
 
         return Response({
             "updated": updated,

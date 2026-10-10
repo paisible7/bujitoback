@@ -13,7 +13,7 @@ urlpatterns = [
     path('profile/', UserProfileView.as_view(), name='auth_profile'),
     path('users/', UserListCreateView.as_view(), name='auth_users_list'),
     path(
-        'users/<int:pk>/',
+        'users/<str:pk>/',
         UserAdminDetailView.as_view(),
         name='auth_users_detail',
     ),

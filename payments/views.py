@@ -620,8 +620,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         payments = (
-            Payment.objects.select_related("user", "order", "method")
-            .order_by("-created_at")
+            Payment.objects.select_related(
+                "user", "order", "method", "expedition"
+            ).order_by("-created_at")
         )
         serializer = PaymentSerializer(
             payments, many=True, context={'request': request}
@@ -633,6 +634,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         """Admin : confirmer / rejeter un paiement ou transfert d'argent."""
         from users.roles import is_app_admin
         from notifications.utils import send_fcm_notification
+        import logging
+
+        logger = logging.getLogger(__name__)
 
         if not is_app_admin(request.user):
             return Response(
@@ -648,10 +652,14 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             )
 
         try:
-            payment = Payment.objects.select_related(
-                "user", "order", "method", "expedition"
-            ).get(pk=pk)
-        except Payment.DoesNotExist:
+            payment = resolve_uuid_or_pk(
+                Payment.objects.select_related(
+                    "user", "order", "method", "expedition"
+                ),
+                pk,
+            )
+        except (Payment.DoesNotExist, ValueError, TypeError) as exc:
+            logger.warning("set_status lookup failed pk=%r: %s", pk, exc)
             return Response(
                 {"message": "Paiement non trouvé"},
                 status=status.HTTP_404_NOT_FOUND,
@@ -669,12 +677,17 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             and payment.order_id is not None
         ):
             order = payment.order
-            if (
-                order is None
-                or not order.quote_ready
-                or order.total_amount <= 0
-                or payment.amount != order.total_amount
-            ):
+            try:
+                amounts_match = (
+                    order is not None
+                    and order.quote_ready
+                    and order.total_amount is not None
+                    and order.total_amount > 0
+                    and payment.amount == order.total_amount
+                )
+            except Exception:
+                amounts_match = False
+            if not amounts_match:
                 return Response(
                     {
                         "message": (
@@ -687,12 +700,17 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
 
         if new_status == "completed" and payment.expedition_id is not None:
             expedition = payment.expedition
-            if (
-                expedition is None
-                or expedition.status != "awaiting_payment"
-                or expedition.total_due_now <= 0
-                or payment.amount != expedition.total_due_now
-            ):
+            try:
+                amounts_match = (
+                    expedition is not None
+                    and expedition.status == "awaiting_payment"
+                    and expedition.total_due_now is not None
+                    and expedition.total_due_now > 0
+                    and payment.amount == expedition.total_due_now
+                )
+            except Exception:
+                amounts_match = False
+            if not amounts_match:
                 return Response(
                     {
                         "message": (

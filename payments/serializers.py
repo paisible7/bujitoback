@@ -24,6 +24,8 @@ class PaymentMethodSerializer(PublicUUIDSerializerMixin, serializers.ModelSerial
 
 class PaymentSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     method = serializers.SerializerMethodField()
+    order = serializers.SerializerMethodField()
+    expedition = serializers.SerializerMethodField()
     redirect_url = serializers.ReadOnlyField(source='payment_url')
     user_email = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
@@ -81,6 +83,19 @@ class PaymentSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     def get_method(self, obj):
         # Flutter expects a string value like 'orange_money', not the FK id.
         return getattr(obj.method, 'code', None) or ''
+
+    @staticmethod
+    def _public_fk_id(related):
+        if related is None:
+            return None
+        public = getattr(related, 'uuid', None)
+        return str(public) if public is not None else related.pk
+
+    def get_order(self, obj):
+        return self._public_fk_id(obj.order)
+
+    def get_expedition(self, obj):
+        return self._public_fk_id(obj.expedition)
 
     def get_user_email(self, obj):
         return getattr(obj.user, 'email', None)

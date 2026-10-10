@@ -24,10 +24,11 @@ urlpatterns = [
     path('api/auth/', include('users.urls')),
 
     # Notifications, Commandes et Colis (inclus sous /api/)
+    # Les commandes sont servies par parcels.urls (/api/orders/) — ne pas
+    # réinclure orders.urls (ViewSet stub) qui interceptait les UUID.
     path('api/', include(router.urls)),
     path('api/', include('parcels.urls')),
     path('api/payments/', include('payments.urls')),
-    path('api/orders/', include('orders.urls')),
     path('api/pricing/', include('pricing.urls')),
     path('api/ads/', include('ads.urls')),
     path('api/admin/', include('reports.urls')),

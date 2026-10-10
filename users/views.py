@@ -31,6 +31,7 @@ from .serializers import (
     build_china_sea_address,
 )
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from core.serializers import UUIDLookupMixin
 from .admin_permissions import normalize_admin_permissions
 from parcels.pagination import OptionalPageNumberPagination
 
@@ -228,7 +229,7 @@ class UserListCreateView(generics.ListCreateAPIView):
         )
 
 
-class UserAdminDetailView(generics.RetrieveUpdateAPIView):
+class UserAdminDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
     """Admin : détail / mise à jour (étoiles) d'un utilisateur."""
 
     permission_classes = [IsAuthenticated, IsAppAdmin]

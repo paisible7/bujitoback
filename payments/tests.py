@@ -168,7 +168,10 @@ class PaymentInitiationTests(APITestCase):
                 )
 
                 self.assertEqual(response.status_code, 200, response.data)
-                transaction = Payment.objects.get(pk=response.data["transaction"]["id"])
+                tx = response.data["transaction"]
+                transaction = Payment.objects.get(
+                    pk=tx.get("pk") or tx["id"],
+                )
                 self.assertEqual(transaction.amount, Decimal("115.87"))
                 self.assertEqual(
                     transaction.provider_raw_response["recharge_amount"],
@@ -199,7 +202,8 @@ class PaymentInitiationTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.data)
-        transaction = Payment.objects.get(pk=response.data["transaction"]["id"])
+        tx = response.data["transaction"]
+        transaction = Payment.objects.get(pk=tx.get("pk") or tx["id"])
         self.assertEqual(transaction.amount, Decimal("100.00"))
         self.assertNotIn("recharge_fee", transaction.provider_raw_response)
 
@@ -336,3 +340,91 @@ class PaymentCompletionSignalTests(TransactionTestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertFalse(order.parcels.exists())
+
+
+class AdminPaymentSetStatusUuidTests(TransactionTestCase):
+    """Confirmer un paiement Mobile Money par UUID public (admin)."""
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="mm-payer@example.com",
+            password="test-password",
+        )
+        self.admin = CustomUser.objects.create_user(
+            email="mm-admin@example.com",
+            password="test-password",
+            role="admin",
+            is_staff=True,
+        )
+        self.method, _ = PaymentMethod.objects.get_or_create(
+            code="orange_money",
+            defaults={"name": "Mobile Money", "is_active": True},
+        )
+        if not self.method.is_active:
+            self.method.is_active = True
+            self.method.save(update_fields=["is_active"])
+        self.api = APIClient()
+        self.api.force_authenticate(self.admin)
+        for target in (
+            "parcels.signals.send_fcm_notification",
+            "parcels.signals.notify_admins",
+            "parcels.fulfillment.send_fcm_notification",
+            "parcels.fulfillment.notify_admins",
+            "notifications.utils.send_fcm_notification",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_admin_confirms_mobile_money_payment_by_uuid(self):
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("122.00"),
+            expected_parcel_count=1,
+        )
+        payment = Payment.objects.create(
+            user=self.user,
+            order=order,
+            amount=Decimal("122.00"),
+            currency="USD",
+            reference="PAY-MM-UUID",
+            method=self.method,
+            status="pending",
+        )
+
+        response = self.api.post(
+            reverse("payment-set-status", kwargs={"pk": str(payment.uuid)}),
+            {"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["transaction"]["status"], "completed")
+        self.assertEqual(str(response.data["transaction"]["id"]), str(payment.uuid))
+        self.assertEqual(
+            str(response.data["transaction"]["order"]),
+            str(order.uuid),
+        )
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, "completed")
+        self.assertEqual(order.parcels.count(), 1)
+
+    def test_admin_confirms_money_transfer_by_uuid(self):
+        payment = Payment.objects.create(
+            user=self.user,
+            order=None,
+            amount=Decimal("50.00"),
+            currency="USD",
+            reference="TRF-MM-UUID",
+            method=self.method,
+            status="pending",
+            provider_raw_response={"type": "money_transfer"},
+        )
+        response = self.api.post(
+            reverse("payment-set-status", kwargs={"pk": str(payment.uuid)}),
+            {"status": "completed"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, "completed")

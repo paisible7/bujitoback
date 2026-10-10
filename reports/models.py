@@ -17,13 +17,11 @@ class Expense(PublicUUIDModel):
     )
     currency = models.CharField(max_length=10, default='USD', verbose_name=_('Devise'))
     expense_date = models.DateField(default=timezone.localdate, verbose_name=_('Date'))
-    client = models.ForeignKey(
+    clients = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
         blank=True,
         related_name='accounting_expenses',
-        verbose_name=_('Client concerné'),
+        verbose_name=_('Clients concernés'),
     )
     recorded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -32,6 +30,12 @@ class Expense(PublicUUIDModel):
         blank=True,
         related_name='recorded_expenses',
         verbose_name=_('Enregistrée par'),
+    )
+    proof_image = models.ImageField(
+        upload_to='expenses/proofs/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_('Preuve (reçu / capture)'),
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

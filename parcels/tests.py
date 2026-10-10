@@ -67,6 +67,44 @@ class OrderQuoteSerializerTests(TestCase):
         self.assertEqual(items[0]["description"], "Produit présenté sur la photo")
         self.assertEqual(items[0]["url"], "")
 
+    def test_admin_can_patch_quote_by_public_uuid(self):
+        """Régression UUID : PATCH /api/orders/<uuid>/ doit établir le devis."""
+        order = Order.objects.create(user=self.user)
+        admin = CustomUser.objects.create_user(
+            email="quote-admin@example.com",
+            password="test-password",
+            role="admin",
+            is_staff=True,
+        )
+        client = APIClient()
+        client.force_authenticate(admin)
+
+        response = client.patch(
+            reverse("order-detail", kwargs={"pk": str(order.uuid)}),
+            {
+                "product_items": [
+                    {
+                        "description": "Article devis",
+                        "quantity": 1,
+                        "price": "3.00",
+                    }
+                ],
+                "withdrawal_fee": "3.00",
+                "commission_fee": "7.00",
+                "expected_parcel_count": 2,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(str(response.data["id"]), str(order.uuid))
+        self.assertTrue(response.data["quote_ready"])
+        # total = lignes (3) + retrait (3) + commission (7) — hors multiplication colis
+        self.assertEqual(Decimal(str(response.data["total_amount"])), Decimal("13.00"))
+        order.refresh_from_db()
+        self.assertTrue(order.quote_ready)
+        self.assertEqual(order.expected_parcel_count, 2)
+
 
 class OrderPhotoUploadTests(TestCase):
     def setUp(self):
@@ -95,7 +133,7 @@ class OrderPhotoUploadTests(TestCase):
                 )
 
                 self.assertEqual(response.status_code, 201, response.data)
-                order = Order.objects.get(pk=response.data["id"])
+                order = Order.objects.get(uuid=response.data["id"])
                 self.assertEqual(order.images.count(), 2)
                 self.assertTrue(all(image.image.storage.exists(image.image.name) for image in order.images.all()))
 
@@ -130,7 +168,7 @@ class OrderPhotoUploadTests(TestCase):
                 )
 
                 self.assertEqual(response.status_code, 201, response.data)
-                order = Order.objects.get(pk=response.data["id"])
+                order = Order.objects.get(uuid=response.data["id"])
                 self.assertEqual(order.images.count(), 1)
                 self.assertEqual(order.images.first().package_index, 0)
                 self.assertEqual(order.expected_parcel_count, 1)
@@ -399,3 +437,108 @@ class OrderPaginationTests(TestCase):
         self.assertTrue(
             all(item["status"] == "pending" for item in response.data["results"])
         )
+
+
+class UuidLookupRegressionTests(TestCase):
+    """Régressions UUID : groupage, MCO, frais d'expédition."""
+
+    def setUp(self):
+        self.user = CustomUser.objects.create_user(
+            email="uuid-client@example.com",
+            password="test-password",
+        )
+        self.admin = CustomUser.objects.create_user(
+            email="uuid-admin@example.com",
+            password="test-password",
+            role="admin",
+            is_staff=True,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+        self.signal_notification = patch("parcels.signals.send_fcm_notification")
+        self.signal_admin_notification = patch("parcels.signals.notify_admins")
+        self.signal_notification.start()
+        self.signal_admin_notification.start()
+        self.addCleanup(self.signal_notification.stop)
+        self.addCleanup(self.signal_admin_notification.stop)
+
+    def test_groupage_parcel_decision_accepts_public_uuid(self):
+        from .models import Consolidation, ConsolidationParcelDecision
+
+        p1 = Parcel.objects.create(
+            tracking_number="BUJ-UUID-1",
+            description="A",
+            status="pending",
+        )
+        p2 = Parcel.objects.create(
+            tracking_number="BUJ-UUID-2",
+            description="B",
+            status="pending",
+        )
+        group = Consolidation.objects.create(user=self.user, status="pending")
+        group.parcels.set([p1, p2])
+
+        response = self.client.patch(
+            reverse("consolidation-detail", kwargs={"pk": str(group.uuid)}),
+            {"parcel_id": str(p1.uuid), "decision": "accepted"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        decision = ConsolidationParcelDecision.objects.get(
+            consolidation=group, parcel=p1
+        )
+        self.assertEqual(decision.decision, "accepted")
+
+    def test_shipment_bulk_status_accepts_public_uuid(self):
+        from .models import ShipmentBatch
+
+        batch = ShipmentBatch.objects.create(
+            code="MCO-UUID-1",
+            status="open",
+            total_weight_kg=Decimal("7.00"),
+        )
+        response = self.client.post(
+            reverse("shipment-bulk-status"),
+            {"ids": [str(batch.uuid)], "status": "shipped"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["updated_count"], 1)
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, "shipped")
+
+    def test_expedition_detail_and_transfer_fee_by_uuid(self):
+        from .models import ExpeditionRequest
+
+        parcel = Parcel.objects.create(
+            tracking_number="BUJ-FEE-1",
+            description="Fee parcel",
+            status="pending",
+        )
+        exp = ExpeditionRequest.objects.create(
+            user=self.user,
+            mode="other_forwarder",
+            status="quoted",
+            forwarder_address="Adresse test",
+            grouping_fee=Decimal("10.00"),
+            forwarder_delivery_fee=Decimal("0.00"),
+            total_due_now=Decimal("10.00"),
+        )
+        exp.parcels.add(parcel)
+
+        detail = self.client.get(
+            reverse("expedition-detail", kwargs={"pk": str(exp.uuid)})
+        )
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(str(detail.data["id"]), str(exp.uuid))
+
+        patched = self.client.patch(
+            reverse("expedition-detail", kwargs={"pk": str(exp.uuid)}),
+            {"forwarder_delivery_fee": "25.00"},
+            format="json",
+        )
+        self.assertEqual(patched.status_code, 200, patched.data)
+        exp.refresh_from_db()
+        self.assertEqual(exp.status, "awaiting_payment")
+        self.assertEqual(exp.forwarder_delivery_fee, Decimal("25.00"))
+        self.assertEqual(exp.total_due_now, Decimal("35.00"))

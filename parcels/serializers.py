@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from core.serializers import PublicUUIDSerializerMixin
+from core.serializers import PublicUUIDSerializerMixin, lookup_optional
 from .models import Order, Parcel, Consolidation, ConsolidationParcelDecision, OrderImage, ConsolidationNoteImage, ShipmentBatch, ExpeditionRequest
 from users.serializers import UserSerializer # Pour inclure les détails de l'utilisateur si nécessaire
 from .media_urls import absolute_media_url
@@ -982,7 +982,8 @@ class ConsolidationClientUpdateSerializer(serializers.Serializer):
 
 
 class ConsolidationUpdateSerializer(serializers.ModelSerializer):
-    parcel_id = serializers.IntegerField(required=False)
+    # UUID public (ou PK entière) — le client Flutter envoie l'id public.
+    parcel_id = serializers.CharField(required=False, allow_blank=False)
     decision = serializers.ChoiceField(
         choices=['pending', 'accepted', 'rejected'],
         required=False,
@@ -1053,10 +1054,12 @@ class ConsolidationUpdateSerializer(serializers.ModelSerializer):
             )
 
         if has_parcel and self.instance is not None:
-            if not self.instance.parcels.filter(pk=attrs['parcel_id']).exists():
+            parcel = lookup_optional(Parcel.objects.all(), attrs['parcel_id'])
+            if parcel is None or not self.instance.parcels.filter(pk=parcel.pk).exists():
                 raise serializers.ValidationError(
                     "Ce colis ne fait pas partie de ce groupage."
                 )
+            attrs['parcel_id'] = parcel.pk
 
         target_status = attrs.get('status')
         if target_status == 'completed':

@@ -18,7 +18,7 @@ urlpatterns = [
         name='admin-accounting-expenses',
     ),
     path(
-        'accounting/expenses/<int:pk>/',
+        'accounting/expenses/<str:pk>/',
         AdminAccountingExpenseDetailView.as_view(),
         name='admin-accounting-expense-detail',
     ),
