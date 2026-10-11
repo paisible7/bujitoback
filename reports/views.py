@@ -204,13 +204,16 @@ def _financial_summary(payments, expenses):
         revenue = revenues.get(currency, Decimal('0'))
         spent = expense_totals.get(currency, Decimal('0'))
         net = revenue - spent
+        # profit/loss conservés pour compat API ; l'UI affiche « net ».
+        # Une dépense n'est pas une perte : loss = déficit seulement si recettes > 0.
+        loss = float(max(-net, Decimal('0'))) if revenue > 0 else 0.0
         rows.append({
             'currency': currency,
             'revenue': float(revenue),
             'expenses': float(spent),
             'net': float(net),
             'profit': float(max(net, Decimal('0'))),
-            'loss': float(max(-net, Decimal('0'))),
+            'loss': loss,
         })
     return rows
 
