@@ -320,7 +320,7 @@ class Command(BaseCommand):
 
         # Colis dédiés pour un groupage terminé
         done_order = Order.objects.create(
-            user=user,
+                    user=user,
             status='processing',
             total_amount=Decimal('99.00'),
             quote_ready=True,
