@@ -23,6 +23,7 @@ class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     was_grouped = serializers.SerializerMethodField()
     group_id = serializers.SerializerMethodField()
     mco_code = serializers.SerializerMethodField()
+    mco_status = serializers.SerializerMethodField()
     pending_expedition_id = serializers.SerializerMethodField()
     pending_expedition_status = serializers.SerializerMethodField()
     pending_expedition_mode = serializers.SerializerMethodField()
@@ -39,7 +40,7 @@ class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
             'volume_cbm',
             'warehouse_number', 'china_arrival_date', 'description',
             'image', 'package_photo', 'package_photos', 'last_updated', 'order',
-            'user_email', 'was_grouped', 'group_id', 'mco_code',
+            'user_email', 'was_grouped', 'group_id', 'mco_code', 'mco_status',
             'pending_expedition_id',
             'pending_expedition_status',
             'pending_expedition_mode',
@@ -50,6 +51,7 @@ class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
         read_only_fields = (
             'last_updated',
             'mco_code',
+            'mco_status',
             'pending_expedition_id',
             'pending_expedition_status',
             'pending_expedition_mode',
@@ -67,12 +69,20 @@ class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
             return None
         return str(group.uuid) if getattr(group, 'uuid', None) else group.pk
 
-    def get_mco_code(self, obj):
+    def _latest_mco_batch(self, obj):
         batches = list(obj.shipment_batches.all())
         if not batches:
             return None
         batches.sort(key=lambda b: b.created_at or b.pk, reverse=True)
-        return batches[0].code
+        return batches[0]
+
+    def get_mco_code(self, obj):
+        batch = self._latest_mco_batch(obj)
+        return batch.code if batch else None
+
+    def get_mco_status(self, obj):
+        batch = self._latest_mco_batch(obj)
+        return batch.status if batch else None
 
     def _pending_expedition(self, obj):
         cache = getattr(self, '_pending_exp_cache', None)

@@ -728,6 +728,66 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
             return obj
         self.permission_denied(self.request)
 
+    def update(self, request, *args, **kwargs):
+        """Admin update — accepte aussi user_email pour réassigner le propriétaire."""
+        if not is_app_admin(request.user):
+            self.permission_denied(request)
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        # user_email est un SerializerMethodField (lecture seule) : on le traite ici.
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        user_email = ''
+        raw_email = data.pop('user_email', None) if hasattr(data, 'pop') else None
+        if raw_email is None and isinstance(request.data, dict):
+            raw_email = request.data.get('user_email')
+        if isinstance(raw_email, (list, tuple)):
+            raw_email = raw_email[0] if raw_email else ''
+        user_email = str(raw_email or '').strip()
+
+        serializer = self.get_serializer(instance, data=data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        parcel = serializer.instance
+
+        if user_email:
+            owner = CustomUser.objects.filter(email__iexact=user_email).first()
+            if owner is None:
+                return Response(
+                    {'detail': f'Aucun client avec l’email {user_email}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            client_name = (
+                str(request.data.get('client_name') or parcel.client_name or '').strip()
+                or (owner.full_name or '').strip()
+                or owner.email
+            )
+            client_phone = (
+                str(request.data.get('client_phone') or parcel.client_phone or '').strip()
+                or (getattr(owner, 'phone_number', None) or '')
+            )
+            if parcel.order_id:
+                order = parcel.order
+                order.user = owner
+                order.client_name = client_name
+                order.client_phone = client_phone
+                order.save(update_fields=['user', 'client_name', 'client_phone'])
+            else:
+                from .models import Order
+                order = Order.objects.create(
+                    user=owner,
+                    status='processing',
+                    client_name=client_name,
+                    client_phone=client_phone,
+                )
+                parcel.order = order
+                parcel.save(update_fields=['order', 'last_updated'])
+            parcel.client_name = client_name
+            parcel.client_phone = client_phone
+            parcel.save(update_fields=['client_name', 'client_phone', 'last_updated'])
+
+        parcel.refresh_from_db()
+        return Response(ParcelSerializer(parcel, context={'request': request}).data)
+
     def perform_update(self, serializer):
         if (not is_app_admin(self.request.user)):
             self.permission_denied(self.request)
@@ -1661,6 +1721,37 @@ def _expedition_quote_or_create(request, *, create: bool):
         owner = request.user
 
     with transaction.atomic():
+        # Verrouille les colis pour empêcher deux créations concurrentes.
+        locked_ids = [p.pk for p in parcels]
+        list(Parcel.objects.select_for_update().filter(pk__in=locked_ids))
+        race = (
+            ExpeditionRequest.objects.filter(
+                parcels__in=locked_ids,
+                status__in=['quoted', 'awaiting_payment', 'paid'],
+            )
+            .distinct()
+            .order_by('-id')
+            .first()
+        )
+        if race is not None:
+            if (race.mode or '') == mode and race.user_id == owner.id:
+                return Response(
+                    ExpeditionRequestSerializer(race).data,
+                    status=status.HTTP_200_OK,
+                )
+            if race.status in ('quoted', 'awaiting_payment') and race.user_id == owner.id:
+                race.status = 'cancelled'
+                race.save(update_fields=['status'])
+            else:
+                return Response(
+                    {
+                        "detail": (
+                            "Une demande d'expédition est déjà active "
+                            "pour ces colis."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
         exp = ExpeditionRequest.objects.create(
             user=owner,
             mode=quote['mode'],
@@ -1936,20 +2027,31 @@ class ExpeditionDetailView(APIView):
 
 
 def _apply_shipment_batch_status(batch, new_status: str) -> list[str]:
-    """Applique un statut MCO et propage `in_transit` aux colis si expédié.
+    """Applique un statut MCO et propage le statut colis correspondant.
 
     Retourne la liste des champs à sauvegarder sur le batch.
     """
     from django.utils import timezone
     from .grouping import sync_completed_group_parcel_status
 
+    parcel_status_map = {
+        'shipped': 'in_transit',
+        'in_transit': 'in_transit',
+        'arrived': 'in_transit',
+        'out_for_delivery': 'out_for_delivery',
+        'delivered': 'delivered',
+        'exception': 'exception',
+    }
+
     update_fields = ['status']
     batch.status = new_status
-    if new_status == 'shipped':
+    if new_status in ('shipped', 'in_transit') and batch.shipped_at is None:
         batch.shipped_at = timezone.now()
         update_fields.append('shipped_at')
+    parcel_status = parcel_status_map.get(new_status)
+    if parcel_status:
         for parcel in batch.parcels.all():
-            parcel.status = 'in_transit'
+            parcel.status = parcel_status
             parcel.save(update_fields=['status', 'last_updated'])
             sync_completed_group_parcel_status(parcel)
     return update_fields

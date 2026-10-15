@@ -83,6 +83,72 @@ class PaymentInitiationTests(APITestCase):
         self.assertEqual(payload["transaction"]["status"], "completed")
         self.assertEqual(Payment.objects.get(order=order).status, "completed")
 
+    def test_processing_fee_added_to_order_payment(self):
+        cfg = BusinessSettings.load()
+        cfg.payment_processing_fee_percent = Decimal("10.00")
+        cfg.save(update_fields=["payment_processing_fee_percent"])
+
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("100.00"),
+        )
+        response = self.client.post(
+            reverse("payment-initiate"),
+            {"order_id": order.pk, "method": "card"},
+        )
+        self.assertEqual(response.status_code, 200)
+        tx = response.json()["transaction"]
+        self.assertEqual(Decimal(str(tx["amount"])), Decimal("110.00"))
+        self.assertEqual(Decimal(str(tx["processing_fee"])), Decimal("10.00"))
+        self.assertEqual(Decimal(str(tx["service_amount"])), Decimal("100.00"))
+        payment = Payment.objects.get(order=order)
+        self.assertEqual(payment.amount, Decimal("110.00"))
+        meta = payment.provider_raw_response
+        self.assertEqual(meta["processing_fee"], "10.00")
+
+    def test_receipt_pdf_for_completed_payment(self):
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("25.00"),
+        )
+        initiate = self.client.post(
+            reverse("payment-initiate"),
+            {"order_id": order.pk, "method": "card"},
+        )
+        self.assertEqual(initiate.status_code, 200)
+        payment_id = initiate.json()["transaction"]["id"]
+        receipt = self.client.get(reverse("payment-receipt", kwargs={"pk": payment_id}))
+        self.assertEqual(receipt.status_code, 200)
+        self.assertEqual(receipt["Content-Type"], "application/pdf")
+        self.assertTrue(receipt.content.startswith(b"%PDF"))
+        self.assertIn("attachment", receipt["Content-Disposition"])
+        self.assertIn(".pdf", receipt["Content-Disposition"])
+        # Artefact local pour inspection visuelle du rendu maquette.
+        from pathlib import Path
+
+        out = (
+            Path(__file__).resolve().parents[1].parent
+            / "bujitodigital"
+            / "tool"
+            / "receipt_from_django_test.pdf"
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(receipt.content)
+
+        pending = Payment.objects.create(
+            user=self.user,
+            order=None,
+            amount=Decimal("5.00"),
+            currency="USD",
+            reference="PAY-PENDING-RCPT",
+            method=self.method,
+            status="pending",
+        )
+        bad = self.client.get(reverse("payment-receipt", kwargs={"pk": pending.pk}))
+        self.assertEqual(bad.status_code, 400)
+
     def test_card_payment_completes_existing_pending_payment(self):
         order = Order.objects.create(
             user=self.user,

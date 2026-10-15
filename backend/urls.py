@@ -9,6 +9,7 @@ from rest_framework_simplejwt.views import (
 )
 from users.views import CustomTokenObtainPairView
 from notifications.views import NotificationViewSet
+from reports.views import SupportChatView
 
 router = DefaultRouter()
 router.register(r'notifications', NotificationViewSet, basename='notification')
@@ -32,6 +33,13 @@ urlpatterns = [
     path('api/pricing/', include('pricing.urls')),
     path('api/ads/', include('ads.urls')),
     path('api/admin/', include('reports.urls')),
+    # Chat Service client (accessible client + admin)
+    path('api/support-chat/', SupportChatView.as_view(), name='support-chat-me'),
+    path(
+        'api/support-chat/<int:client_id>/',
+        SupportChatView.as_view(),
+        name='support-chat-for-client',
+    ),
 ]
 
 # Media : django.conf.urls.static.static() ne fait RIEN si DEBUG=False.

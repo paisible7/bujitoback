@@ -332,8 +332,14 @@ class ShipmentBatch(PublicUUIDModel):
 
     STATUS_CHOICES = [
         ('open', _('Ouvert')),
+        ('ready', _('Prêt')),
         ('shipped', _('Expédié')),
+        ('in_transit', _('En transit')),
+        ('arrived', _('Arrivé')),
+        ('out_for_delivery', _('En livraison')),
+        ('delivered', _('Livré')),
         ('closed', _('Fermé')),
+        ('exception', _('Incident')),
     ]
 
     code = models.CharField(max_length=50, unique=True, verbose_name=_("Code MCO"))

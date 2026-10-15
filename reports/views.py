@@ -21,10 +21,10 @@ from parcels.models import Order, Parcel
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 from payments.models import Payment
 from payments.serializers import PaymentSerializer
-from .models import Expense
-from .serializers import ExpenseSerializer
+from .models import Expense, SupportMessage
+from .serializers import ExpenseSerializer, SupportMessageSerializer
 from users.permissions import IsAppAdmin
-from users.roles import CLIENT_ROLES
+from users.roles import CLIENT_ROLES, is_app_admin
 from users.serializers import (
     build_china_air_address,
     build_china_sea_address,
@@ -194,26 +194,47 @@ def _financial_summary(payments, expenses):
         revenues[currency] = revenues.get(currency, Decimal('0')) + (row['amount'] or Decimal('0'))
 
     expense_totals = {}
-    for row in expenses.values('currency').annotate(amount=Sum('amount')):
+    loss_totals = {}
+    for row in expenses.values('currency', 'entry_type').annotate(amount=Sum('amount')):
         currency = _normalize_currency(row['currency'])
-        expense_totals[currency] = expense_totals.get(currency, Decimal('0')) + (
-            row['amount'] or Decimal('0')
-        )
+        amount = row['amount'] or Decimal('0')
+        if (row.get('entry_type') or 'expense') == 'loss':
+            loss_totals[currency] = loss_totals.get(currency, Decimal('0')) + amount
+        else:
+            expense_totals[currency] = expense_totals.get(currency, Decimal('0')) + amount
     rows = []
-    for currency in sorted(set(revenues) | set(expense_totals)):
+    for currency in sorted(set(revenues) | set(expense_totals) | set(loss_totals)):
         revenue = revenues.get(currency, Decimal('0'))
         spent = expense_totals.get(currency, Decimal('0'))
-        net = revenue - spent
-        # profit/loss conservés pour compat API ; l'UI affiche « net ».
-        # Une dépense n'est pas une perte : loss = déficit seulement si recettes > 0.
-        loss = float(max(-net, Decimal('0'))) if revenue > 0 else 0.0
+        lost = loss_totals.get(currency, Decimal('0'))
+        net = revenue - spent - lost
         rows.append({
             'currency': currency,
             'revenue': float(revenue),
             'expenses': float(spent),
+            'losses': float(lost),
             'net': float(net),
             'profit': float(max(net, Decimal('0'))),
-            'loss': loss,
+            # « loss » = pertes enregistrées (pas le déficit net).
+            'loss': float(lost),
+        })
+    return rows
+
+
+def _expedition_completed_totals(request, start, end):
+    qs = Payment.objects.filter(status='completed')
+    qs = _apply_created_range(qs, start, end, 'created_at')
+    qs = _filter_payments_by_type(qs, 'expedition')
+    rows = []
+    for row in (
+        qs.values('currency')
+        .annotate(amount=Sum('amount'), count=Count('id'))
+        .order_by('currency')
+    ):
+        rows.append({
+            'currency': _normalize_currency(row['currency']),
+            'amount': float(row['amount'] or 0),
+            'count': row['count'] or 0,
         })
     return rows
 
@@ -377,6 +398,10 @@ class AdminAccountingView(APIView):
         qs = _filter_payments_by_type(qs, type_filter)
         qs = _filter_payment_search(qs, request.query_params)
         expenses = _accounting_expenses(request)
+        expense_page = max(1, int(request.query_params.get('expense_page') or 1))
+        expense_page_size = min(
+            100, max(1, int(request.query_params.get('expense_page_size') or 20))
+        )
 
         totals = _amount_buckets(qs)
         by_method = []
@@ -402,8 +427,12 @@ class AdminAccountingView(APIView):
         transactions = PaymentSerializer(
             page_qs, many=True, context={'request': request}
         ).data
+        expense_count = expenses.count()
+        expense_offset = (expense_page - 1) * expense_page_size
         expense_rows = ExpenseSerializer(
-            expenses.order_by('-expense_date', '-created_at')[:200],
+            expenses.order_by('-expense_date', '-created_at')[
+                expense_offset : expense_offset + expense_page_size
+            ],
             many=True,
             context={'request': request},
         ).data
@@ -421,9 +450,14 @@ class AdminAccountingView(APIView):
                     'failed': totals.get('failed', []),
                     'cancelled': totals.get('cancelled', []),
                 },
+                'expedition_completed': _expedition_completed_totals(
+                    request, start, end
+                ),
                 'by_method': by_method,
                 'financial_summary': _financial_summary(qs, expenses),
-                'expense_count': expenses.count(),
+                'expense_count': expense_count,
+                'expense_page': expense_page,
+                'expense_page_size': expense_page_size,
                 'expenses': expense_rows,
                 'count': total_count,
                 'page': page,
@@ -573,3 +607,51 @@ class AdminClientServiceView(APIView):
             )
 
         return Response({'count': len(results), 'results': results})
+
+
+class SupportChatView(APIView):
+    """Fil de chat Service client — admin (client_id) ou client (son fil)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def _client_user(self, request, client_id=None):
+        if is_app_admin(request.user):
+            if not client_id:
+                return None, Response(
+                    {'detail': 'client_id requis.'},
+                    status=400,
+                )
+            client = User.objects.filter(pk=client_id, role__in=CLIENT_ROLES).first()
+            if client is None:
+                return None, Response({'detail': 'Client introuvable.'}, status=404)
+            return client, None
+        return request.user, None
+
+    def get(self, request, client_id=None):
+        client, err = self._client_user(request, client_id)
+        if err is not None:
+            return err
+        qs = SupportMessage.objects.filter(client=client).select_related(
+            'sender', 'client'
+        )
+        return Response({
+            'client_id': client.pk,
+            'results': SupportMessageSerializer(qs, many=True).data,
+        })
+
+    def post(self, request, client_id=None):
+        client, err = self._client_user(request, client_id)
+        if err is not None:
+            return err
+        body = (request.data.get('body') or '').strip()
+        if len(body) < 1:
+            return Response({'detail': 'Message vide.'}, status=400)
+        msg = SupportMessage.objects.create(
+            client=client,
+            sender=request.user,
+            body=body[:4000],
+        )
+        return Response(
+            SupportMessageSerializer(msg).data,
+            status=201,
+        )

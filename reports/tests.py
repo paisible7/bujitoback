@@ -159,8 +159,38 @@ class AdminReportsApiTests(TestCase):
                 self.assertEqual(summary['currency'], 'USD')
                 self.assertEqual(summary['revenue'], 10.0)
                 self.assertEqual(summary['expenses'], 15.0)
+                self.assertEqual(summary['losses'], 0.0)
+                self.assertEqual(summary['net'], -5.0)
                 self.assertEqual(summary['profit'], 0.0)
-                self.assertEqual(summary['loss'], 5.0)
+                self.assertEqual(summary['loss'], 0.0)
+
+                loss_proof = SimpleUploadedFile(
+                    'loss.jpg',
+                    image.getvalue(),
+                    content_type='image/jpeg',
+                )
+                created_loss = self.client.post(
+                    '/api/admin/accounting/expenses/',
+                    {
+                        'name': 'Colis perdu',
+                        'category': 'Perte',
+                        'amount': '3.00',
+                        'currency': 'USD',
+                        'entry_type': 'loss',
+                        'expense_date': timezone.localdate().isoformat(),
+                        'clients': str(self.client_user.pk),
+                        'proof_image': loss_proof,
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(created_loss.status_code, 201, created_loss.data)
+                summary2 = self.client.get('/api/admin/accounting/').json()[
+                    'financial_summary'
+                ][0]
+                self.assertEqual(summary2['expenses'], 15.0)
+                self.assertEqual(summary2['losses'], 3.0)
+                self.assertEqual(summary2['net'], -8.0)
+                self.assertEqual(summary2['loss'], 3.0)
 
                 filtered = self.client.get(
                     '/api/admin/accounting/',
@@ -180,8 +210,8 @@ class AdminReportsApiTests(TestCase):
                     {'client': 'Client Reports'},
                 )
                 self.assertEqual(expense_rows.status_code, 200)
-                self.assertEqual(len(expense_rows.json()), 1)
-                self.assertEqual(expense_rows.json()[0]['name'], 'Transporteur')
+                names = {row['name'] for row in expense_rows.json()}
+                self.assertEqual(names, {'Transporteur', 'Colis perdu'})
 
     def test_accounting_pagination_bounds(self):
         self.client.force_authenticate(self.admin)
@@ -203,3 +233,26 @@ class AdminReportsApiTests(TestCase):
         ):
             response = self.client.get(url)
             self.assertIn(response.status_code, (401, 403), url)
+
+    def test_support_chat_client_and_admin(self):
+        self.client.force_authenticate(self.client_user)
+        created = self.client.post(
+            '/api/support-chat/',
+            {'body': 'Bonjour support'},
+            format='json',
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        listed = self.client.get('/api/support-chat/')
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()['results']), 1)
+
+        self.client.force_authenticate(self.admin)
+        reply = self.client.post(
+            f'/api/support-chat/{self.client_user.pk}/',
+            {'body': 'Nous vous aidons'},
+            format='json',
+        )
+        self.assertEqual(reply.status_code, 201, reply.data)
+        thread = self.client.get(f'/api/support-chat/{self.client_user.pk}/')
+        self.assertEqual(thread.status_code, 200)
+        self.assertEqual(len(thread.json()['results']), 2)

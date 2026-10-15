@@ -32,6 +32,7 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "usd_to_xof",
             "usd_to_cny",
             "alipay_wechat_recharge_fee_percent",
+            "payment_processing_fee_percent",
             "china_warehouse_phone",
             "china_warehouse_street",
             "china_air_address",

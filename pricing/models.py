@@ -125,6 +125,14 @@ class BusinessSettings(PublicUUIDModel):
         validators=[MinValueValidator(0), MaxValueValidator(100)],
         verbose_name=_("Frais recharge Alipay / WeChat Pay (%)"),
     )
+    payment_processing_fee_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        verbose_name=_("Frais de traitement API paiement (%)"),
+        help_text=_("Frais gateway débités au client (hors recharge Alipay/WeChat)."),
+    )
 
     # --- Adresse entrepôt Chine (globale, affiché sur tous les profils clients) ---
     china_warehouse_phone = models.CharField(

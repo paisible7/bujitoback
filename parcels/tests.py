@@ -507,6 +507,38 @@ class UuidLookupRegressionTests(TestCase):
         batch.refresh_from_db()
         self.assertEqual(batch.status, "shipped")
 
+    def test_shipment_batch_accepts_extended_mco_statuses(self):
+        from .models import ShipmentBatch
+
+        allowed = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
+        self.assertTrue(
+            {
+                "open",
+                "ready",
+                "shipped",
+                "in_transit",
+                "arrived",
+                "out_for_delivery",
+                "delivered",
+                "closed",
+                "exception",
+            }.issubset(allowed)
+        )
+        batch = ShipmentBatch.objects.create(
+            code="MCO-STATUS-2",
+            status="open",
+            total_weight_kg=Decimal("8.00"),
+        )
+        for status_code in ("ready", "in_transit", "arrived", "out_for_delivery"):
+            response = self.client.post(
+                reverse("shipment-bulk-status"),
+                {"ids": [str(batch.uuid)], "status": status_code},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 200, response.data)
+            batch.refresh_from_db()
+            self.assertEqual(batch.status, status_code)
+
     def test_expedition_detail_and_transfer_fee_by_uuid(self):
         from .models import ExpeditionRequest
 

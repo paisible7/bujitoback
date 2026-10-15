@@ -64,6 +64,25 @@ def _format_payment_amount(amount, currency: str | None) -> str:
     return f"${value:,.2f}"
 
 
+def _with_processing_fee(service_amount: Decimal, meta: dict | None = None):
+    """Ajoute les frais gateway (debites au client) au montant service."""
+    meta = dict(meta or {})
+    fee_rate = BusinessSettings.load().payment_processing_fee_percent or Decimal("0")
+    fee = (service_amount * fee_rate / Decimal("100")).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    total = service_amount + fee
+    meta.update(
+        {
+            "service_amount": str(service_amount),
+            "processing_fee": str(fee),
+            "processing_fee_rate": str(fee_rate),
+        }
+    )
+    return total, meta
+
+
 def _ensure_checkout_payment_methods():
     """Crée / réactive Mobile Money, Wave et carte bancaire."""
     for code, name in CHECKOUT_METHOD_SPECS:
@@ -313,7 +332,12 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     "recharge_amount": str(recharge_amount),
                     "recharge_fee": str(recharge_fee),
                     "recharge_fee_rate": str(fee_rate),
+                    "service_amount": str(recharge_amount),
+                    "processing_fee": str(recharge_fee),
+                    "processing_fee_rate": str(fee_rate),
                 })
+            else:
+                amount, meta = _with_processing_fee(amount, meta)
             if qr_image is not None:
                 meta["has_qr_image"] = True
         elif is_expedition:
@@ -348,13 +372,16 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     {"message": "Cette expédition est déjà payée."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            amount = expedition.total_due_now
+            service_amount = expedition.total_due_now
             transfer_currency = "USD"
-            meta = {
-                "type": "expedition",
-                "expedition_id": expedition.pk,
-                "mode": expedition.mode,
-            }
+            amount, meta = _with_processing_fee(
+                service_amount,
+                {
+                    "type": "expedition",
+                    "expedition_id": expedition.pk,
+                    "mode": expedition.mode,
+                },
+            )
         else:
             if not order_id:
                 return Response({"message": "order_id is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -381,7 +408,10 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     {"message": "Cette commande est déjà payée."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            amount = order.total_amount
+            amount, meta = _with_processing_fee(
+                order.total_amount,
+                {"type": "order", "order_id": order.pk},
+            )
 
         if method_code in {"orange_money", "mtn_momo", "wave", "moov"} and not phone_number:
             if saved_method_id:
@@ -426,6 +456,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment = pending_payment
                     payment.method = method
                     payment.phone_number = phone_number or payment.phone_number
+                    payment.amount = amount
+                    if meta:
+                        payment.provider_raw_response = meta
                 else:
                     payment = Payment.objects.create(
                         user=request.user,
@@ -461,6 +494,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment = pending_payment
                     payment.method = method
                     payment.phone_number = phone_number or payment.phone_number
+                    payment.amount = amount
+                    if meta:
+                        payment.provider_raw_response = meta
                 else:
                     payment = Payment.objects.create(
                         user=request.user,
@@ -501,6 +537,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 update_fields=[
                     "method",
                     "phone_number",
+                    "amount",
                     "status",
                     "payment_url",
                     "provider_raw_response",
@@ -582,6 +619,37 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["get"])
+    def receipt(self, request, pk=None):
+        """Reçu PDF téléchargeable pour un paiement completed."""
+        from django.http import HttpResponse
+        from users.roles import is_app_admin
+
+        from .receipt import build_receipt_pdf
+
+        try:
+            if is_app_admin(request.user):
+                payment = resolve_uuid_or_pk(Payment.objects.all(), pk)
+            else:
+                payment = resolve_uuid_or_pk(self.get_queryset(), pk)
+        except Payment.DoesNotExist:
+            return Response(
+                {"message": "Paiement non trouvé"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if payment.status != "completed":
+            return Response(
+                {"message": "Le reçu n'est disponible que pour un paiement confirmé."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pdf = build_receipt_pdf(payment)
+        filename = f"recu-{payment.reference or payment.pk}.pdf"
+        response = HttpResponse(pdf, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
 
     @action(detail=False, methods=["post"])
     def verify(self, request):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
 from django.db.models.signals import post_save, pre_save
@@ -9,6 +10,19 @@ from django.dispatch import receiver
 from .models import Payment
 
 logger = logging.getLogger(__name__)
+
+
+def _payment_service_amount(payment: Payment) -> Decimal:
+    """Montant service (hors frais gateway) pour valider une commande."""
+    meta = payment.provider_raw_response
+    if isinstance(meta, dict):
+        raw = meta.get("service_amount")
+        if raw is not None:
+            try:
+                return Decimal(str(raw))
+            except (InvalidOperation, TypeError, ValueError):
+                pass
+    return payment.amount
 
 
 @receiver(pre_save, sender=Payment)
@@ -57,18 +71,20 @@ def _payment_post_save(sender, instance: Payment, created: bool, **kwargs):
         return
 
     order = instance.order
+    service_amount = _payment_service_amount(instance)
     if (
         not order.quote_ready
         or order.total_amount <= 0
-        or instance.amount != order.total_amount
+        or service_amount != order.total_amount
     ):
         logger.warning(
             "Payment %s completed but order %s is not fulfillable "
-            "(quote_ready=%s, payment=%s, total=%s).",
+            "(quote_ready=%s, payment=%s, service=%s, total=%s).",
             instance.pk,
             order.pk,
             order.quote_ready,
             instance.amount,
+            service_amount,
             order.total_amount,
         )
         return

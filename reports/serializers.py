@@ -4,7 +4,7 @@ from rest_framework import serializers
 from core.serializers import PublicUUIDSerializerMixin
 from parcels.media_urls import absolute_media_url
 from users.roles import CLIENT_ROLES
-from .models import Expense
+from .models import Expense, SupportMessage
 
 User = get_user_model()
 
@@ -54,8 +54,8 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     class Meta:
         model = Expense
         fields = (
-            'id', 'name', 'category', 'description', 'amount', 'currency',
-            'expense_date', 'clients', 'client_ids', 'client_names',
+            'id', 'name', 'category', 'entry_type', 'description', 'amount',
+            'currency', 'expense_date', 'clients', 'client_ids', 'client_names',
             'client_name', 'client_email',
             'recorded_by', 'proof_image', 'proof_image_url',
             'created_at', 'updated_at',
@@ -149,3 +149,25 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
         if clients is not None:
             expense.clients.set(clients)
         return expense
+
+
+class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+    is_from_admin = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupportMessage
+        fields = (
+            'id', 'client', 'sender', 'sender_name', 'is_from_admin',
+            'body', 'created_at',
+        )
+        read_only_fields = (
+            'id', 'client', 'sender', 'sender_name', 'is_from_admin', 'created_at',
+        )
+
+    def get_sender_name(self, obj):
+        return (getattr(obj.sender, 'full_name', '') or '').strip() or obj.sender.email
+
+    def get_is_from_admin(self, obj):
+        from users.roles import is_app_admin
+        return is_app_admin(obj.sender)

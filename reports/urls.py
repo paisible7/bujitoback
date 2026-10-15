@@ -7,6 +7,7 @@ from .views import (
     AdminAccountingView,
     AdminClientServiceView,
     AdminStatsView,
+    SupportChatView,
 )
 
 urlpatterns = [
@@ -31,5 +32,11 @@ urlpatterns = [
         'client-service/',
         AdminClientServiceView.as_view(),
         name='admin-client-service',
+    ),
+    path('support-chat/', SupportChatView.as_view(), name='support-chat'),
+    path(
+        'support-chat/<int:client_id>/',
+        SupportChatView.as_view(),
+        name='support-chat-client',
     ),
 ]
