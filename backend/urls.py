@@ -36,7 +36,7 @@ urlpatterns = [
     # Chat Service client (accessible client + admin)
     path('api/support-chat/', SupportChatView.as_view(), name='support-chat-me'),
     path(
-        'api/support-chat/<int:client_id>/',
+        'api/support-chat/<str:client_id>/',
         SupportChatView.as_view(),
         name='support-chat-for-client',
     ),

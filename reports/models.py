@@ -78,7 +78,14 @@ class SupportMessage(PublicUUIDModel):
         related_name='support_messages_sent',
         verbose_name=_('Expéditeur'),
     )
-    body = models.TextField(verbose_name=_('Message'))
+    body = models.TextField(blank=True, default='', verbose_name=_('Message'))
+    attachment = models.ImageField(
+        upload_to='support_chat/%Y/%m/',
+        blank=True,
+        null=True,
+        verbose_name=_('Pièce jointe'),
+    )
+    is_read = models.BooleanField(default=False, db_index=True, verbose_name=_('Lu'))
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -6,7 +6,7 @@ from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
@@ -64,12 +64,29 @@ def _apply_created_range(qs, start, end, field='created_at'):
     return qs
 
 
+def _is_grouping_payment(payment: Payment) -> bool:
+    raw = payment.provider_raw_response
+    if isinstance(raw, dict):
+        t = (raw.get('type') or '').strip().lower()
+        if t in ('grouping', 'groupage') or raw.get('was_grouped') is True:
+            return True
+    exp = getattr(payment, 'expedition', None)
+    if exp is not None:
+        if getattr(exp, 'was_grouped', False) or (getattr(exp, 'grouping_fee', None) or 0) > 0:
+            return True
+    return False
+
+
 def _payment_meta_type(payment: Payment) -> str:
+    if _is_grouping_payment(payment):
+        return 'grouping'
     raw = payment.provider_raw_response
     if isinstance(raw, dict):
         t = (raw.get('type') or '').strip().lower()
         if t == 'money_transfer':
             return 'transfer'
+        if t in ('grouping', 'groupage'):
+            return 'grouping'
         if t == 'expedition':
             return 'expedition'
     if payment.expedition_id:
@@ -94,6 +111,14 @@ def _filter_payments_by_type(qs, type_filter: str):
             Q(expedition_id__isnull=False)
             | Q(provider_raw_response__type='expedition')
         )
+    if t in ('grouping', 'groupage'):
+        return qs.filter(
+            Q(expedition__was_grouped=True)
+            | Q(expedition__grouping_fee__gt=0)
+            | Q(expedition__parcels__consolidations__status='completed')
+            | Q(provider_raw_response__type__in=['grouping', 'groupage'])
+            | Q(provider_raw_response__was_grouped=True)
+        ).distinct()
     return qs
 
 
@@ -473,7 +498,7 @@ class AdminAccountingExportView(APIView):
     def get(self, request):
         start, end = _period_bounds(request)
         type_filter = request.query_params.get('type', 'all')
-        qs = Payment.objects.select_related('user', 'method').order_by('-created_at')
+        qs = Payment.objects.select_related('user', 'method', 'expedition').order_by('-created_at')
         qs = _apply_created_range(qs, start, end, 'created_at')
         qs = _filter_payments_by_type(qs, type_filter)
         qs = _filter_payment_search(qs, request.query_params)
@@ -552,6 +577,16 @@ class AdminClientServiceView(APIView):
                 filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
                 distinct=True,
             ),
+            support_messages_count=Count('support_threads', distinct=True),
+            unread_support_count=Count(
+                'support_threads',
+                filter=Q(
+                    support_threads__is_read=False,
+                    support_threads__sender_id=F('id'),
+                ),
+                distinct=True,
+            ),
+            last_support_at=Max('support_threads__created_at'),
         )
         if search:
             qs = qs.filter(
@@ -559,7 +594,12 @@ class AdminClientServiceView(APIView):
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
             )
-        qs = qs.order_by('-orders_count', 'email')[:50]
+        qs = qs.order_by(
+            '-unread_support_count',
+            F('last_support_at').desc(nulls_last=True),
+            '-orders_count',
+            'email',
+        )[:50]
 
         results = []
         for user in qs:
@@ -579,6 +619,18 @@ class AdminClientServiceView(APIView):
                 recent_payments, many=True, context={'request': request}
             ).data
 
+            last_msg = (
+                SupportMessage.objects.filter(client=user)
+                .select_related('sender', 'client')
+                .order_by('-created_at')
+                .first()
+            )
+            last_msg_data = (
+                SupportMessageSerializer(last_msg, context={'request': request}).data
+                if last_msg is not None
+                else None
+            )
+
             results.append(
                 {
                     'id': user.id,
@@ -592,6 +644,9 @@ class AdminClientServiceView(APIView):
                     'parcels_count': user.parcels_count,
                     'parcels_received_count': user.parcels_received_count,
                     'parcels_sent_count': user.parcels_sent_count,
+                    'support_messages_count': user.support_messages_count,
+                    'unread_support_count': user.unread_support_count,
+                    'last_support_message': last_msg_data,
                     'china_warehouse_address': build_china_warehouse_address(
                         user.full_name, user.phone_number, getattr(user, 'city', '') or ''
                     ),
@@ -610,48 +665,220 @@ class AdminClientServiceView(APIView):
 
 
 class SupportChatView(APIView):
-    """Fil de chat Service client — admin (client_id) ou client (son fil)."""
+    """Fil de chat Service client — admin (client_id ou liste de fils) ou client (son fil)."""
 
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def _resolve_client_id_param(self, request, client_id=None):
+        if client_id is not None and str(client_id).strip():
+            return str(client_id).strip()
+        q_client = (request.query_params.get('client') or request.query_params.get('client_id') or '').strip()
+        if q_client:
+            return q_client
+        if hasattr(request, 'data') and hasattr(request.data, 'get'):
+            d_client = (
+                request.data.get('client_id')
+                or request.data.get('client')
+                or ''
+            )
+            if str(d_client).strip():
+                return str(d_client).strip()
+        return None
+
+    def _find_client_user(self, raw_id: str):
+        qs = User.objects.filter(role__in=CLIENT_ROLES)
+        try:
+            pk = int(raw_id)
+            user = qs.filter(pk=pk).first()
+            if user is not None:
+                return user
+        except (TypeError, ValueError):
+            pass
+        try:
+            import uuid as _uuid
+            uid = _uuid.UUID(str(raw_id))
+            return qs.filter(uuid=uid).first()
+        except (TypeError, ValueError):
+            return None
 
     def _client_user(self, request, client_id=None):
         if is_app_admin(request.user):
-            if not client_id:
+            resolved_id = self._resolve_client_id_param(request, client_id)
+            if not resolved_id:
                 return None, Response(
                     {'detail': 'client_id requis.'},
                     status=400,
                 )
-            client = User.objects.filter(pk=client_id, role__in=CLIENT_ROLES).first()
+            client = self._find_client_user(resolved_id)
             if client is None:
                 return None, Response({'detail': 'Client introuvable.'}, status=404)
             return client, None
         return request.user, None
 
+    def _admin_threads_response(self, request):
+        search = (request.query_params.get('search') or '').strip()
+        qs = User.objects.filter(role__in=CLIENT_ROLES).annotate(
+            messages_count=Count('support_threads', distinct=True),
+            unread_count=Count(
+                'support_threads',
+                filter=Q(
+                    support_threads__is_read=False,
+                    support_threads__sender_id=F('id'),
+                ),
+                distinct=True,
+            ),
+            last_message_at=Max('support_threads__created_at'),
+        )
+        if search:
+            qs = qs.filter(
+                Q(email__icontains=search)
+                | Q(full_name__icontains=search)
+                | Q(phone_number__icontains=search)
+            )
+        qs = qs.order_by(
+            '-unread_count',
+            F('last_message_at').desc(nulls_last=True),
+            'full_name',
+            'email',
+        )[:60]
+
+        threads = []
+        unread_total = 0
+        for u in qs:
+            last_msg = (
+                SupportMessage.objects.filter(client=u)
+                .select_related('sender', 'client')
+                .order_by('-created_at')
+                .first()
+            )
+            unread_total += int(u.unread_count or 0)
+            threads.append(
+                {
+                    'client_id': u.pk,
+                    'full_name': u.full_name or '',
+                    'email': u.email,
+                    'phone_number': u.phone_number or '',
+                    'city': getattr(u, 'city', '') or '',
+                    'stars': getattr(u, 'stars', 0) or 0,
+                    'messages_count': int(u.messages_count or 0),
+                    'unread_count': int(u.unread_count or 0),
+                    'last_message': (
+                        SupportMessageSerializer(
+                            last_msg, context={'request': request}
+                        ).data
+                        if last_msg is not None
+                        else None
+                    ),
+                }
+            )
+        return Response(
+            {
+                'threads': threads,
+                'results': [],
+                'unread_total': unread_total,
+            }
+        )
+
     def get(self, request, client_id=None):
+        if is_app_admin(request.user) and not self._resolve_client_id_param(request, client_id):
+            return self._admin_threads_response(request)
+
         client, err = self._client_user(request, client_id)
         if err is not None:
             return err
+
+        if is_app_admin(request.user):
+            SupportMessage.objects.filter(
+                client=client, sender=client, is_read=False
+            ).update(is_read=True)
+        else:
+            SupportMessage.objects.filter(
+                client=client, is_read=False
+            ).exclude(sender=client).update(is_read=True)
+
         qs = SupportMessage.objects.filter(client=client).select_related(
             'sender', 'client'
         )
-        return Response({
-            'client_id': client.pk,
-            'results': SupportMessageSerializer(qs, many=True).data,
-        })
+        unread_count = (
+            SupportMessage.objects.filter(
+                client=client, is_read=False
+            )
+            .exclude(sender=request.user)
+            .count()
+        )
+        return Response(
+            {
+                'client_id': client.pk,
+                'client_name': (client.full_name or '').strip() or client.email,
+                'client_email': client.email,
+                'client_phone': client.phone_number or '',
+                'unread_count': unread_count,
+                'results': SupportMessageSerializer(
+                    qs, many=True, context={'request': request}
+                ).data,
+            }
+        )
 
     def post(self, request, client_id=None):
         client, err = self._client_user(request, client_id)
         if err is not None:
             return err
         body = (request.data.get('body') or '').strip()
-        if len(body) < 1:
+        attachment = None
+        if hasattr(request, 'FILES'):
+            attachment = request.FILES.get('attachment') or request.FILES.get('image')
+        if len(body) < 1 and attachment is None:
             return Response({'detail': 'Message vide.'}, status=400)
+
+        if is_app_admin(request.user):
+            SupportMessage.objects.filter(
+                client=client, sender=client, is_read=False
+            ).update(is_read=True)
+        else:
+            SupportMessage.objects.filter(
+                client=client, is_read=False
+            ).exclude(sender=client).update(is_read=True)
+
         msg = SupportMessage.objects.create(
             client=client,
             sender=request.user,
             body=body[:4000],
+            attachment=attachment,
+            is_read=False,
         )
+
+        # Notification push / in-app au destinataire
+        try:
+            from notifications.utils import notify_admins, send_fcm_notification
+
+            preview = body[:120] if body else 'Photo jointe dans le chat support.'
+            if is_app_admin(request.user):
+                send_fcm_notification(
+                    client,
+                    'Service client Bujito',
+                    preview,
+                    type='support',
+                    reference_id=str(client.pk),
+                    request=request,
+                    translate=False,
+                )
+            else:
+                client_label = (client.full_name or '').strip() or client.email
+                notify_admins(
+                    f'Service client : {client_label}',
+                    preview,
+                    type='support',
+                    reference_id=str(client.pk),
+                    data={
+                        'client_id': str(client.pk),
+                        'client_label': client_label,
+                    },
+                )
+        except Exception:
+            pass
+
         return Response(
-            SupportMessageSerializer(msg).data,
+            SupportMessageSerializer(msg, context={'request': request}).data,
             status=201,
         )

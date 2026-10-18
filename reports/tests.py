@@ -116,14 +116,45 @@ class AdminReportsApiTests(TestCase):
         self.assertIn('payments_by_day', response.json())
 
     def test_accounting_type_filters(self):
+        from parcels.models import ExpeditionRequest
+
+        exp = ExpeditionRequest.objects.create(
+            user=self.client_user,
+            mode='bujito_digital',
+            transport_mode='air_normal',
+            was_grouped=True,
+            grouping_fee=Decimal('15.00'),
+            total_due_now=Decimal('15.00'),
+        )
+        Payment.objects.create(
+            user=self.client_user,
+            expedition=exp,
+            amount=Decimal('15.00'),
+            currency='USD',
+            reference='REP-GRP-1',
+            method=self.method,
+            status='completed',
+            provider_raw_response={
+                'type': 'expedition',
+                'expedition_id': exp.pk,
+                'was_grouped': True,
+            },
+        )
         self.client.force_authenticate(self.admin)
-        for type_name in ('all', 'order', 'transfer', 'expedition'):
+        for type_name in ('all', 'order', 'transfer', 'expedition', 'grouping'):
             response = self.client.get(
                 '/api/admin/accounting/',
                 {'type': type_name},
             )
             self.assertEqual(response.status_code, 200, type_name)
             self.assertEqual(response.json()['type'], type_name)
+        grouping_res = self.client.get(
+            '/api/admin/accounting/',
+            {'type': 'grouping'},
+        )
+        self.assertEqual(grouping_res.status_code, 200)
+        refs = [r['reference'] for r in grouping_res.json().get('results', [])]
+        self.assertIn('REP-GRP-1', refs)
 
     def test_accounting_search_and_financial_summary(self):
         self.client.force_authenticate(self.admin)
@@ -242,17 +273,90 @@ class AdminReportsApiTests(TestCase):
             format='json',
         )
         self.assertEqual(created.status_code, 201, created.data)
+        self.assertFalse(created.json()['is_from_admin'])
+        self.assertFalse(created.json()['is_read'])
+
         listed = self.client.get('/api/support-chat/')
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(len(listed.json()['results']), 1)
 
+        # L'admin consulte la boîte de réception globale (/api/support-chat/ sans client_id)
         self.client.force_authenticate(self.admin)
+        inbox = self.client.get('/api/support-chat/')
+        self.assertEqual(inbox.status_code, 200)
+        inbox_data = inbox.json()
+        self.assertGreaterEqual(inbox_data['unread_total'], 1)
+        threads = inbox_data['threads']
+        client_thread = next(
+            t for t in threads if t['client_id'] == self.client_user.pk
+        )
+        self.assertEqual(client_thread['unread_count'], 1)
+        self.assertEqual(
+            client_thread['last_message']['body'], 'Bonjour support'
+        )
+
+        # AdminClientServiceView expose aussi les compteurs et le dernier message
+        cs_resp = self.client.get('/api/admin/client-service/')
+        self.assertEqual(cs_resp.status_code, 200)
+        cs_card = next(
+            r
+            for r in cs_resp.json()['results']
+            if r['id'] == self.client_user.pk
+        )
+        self.assertEqual(cs_card['unread_support_count'], 1)
+        self.assertEqual(cs_card['support_messages_count'], 1)
+        self.assertEqual(
+            cs_card['last_support_message']['body'], 'Bonjour support'
+        )
+
+        # Quand l'admin ouvre le fil du client (PK ou UUID), le message du client passe à lu
+        thread_by_uuid = self.client.get(
+            f'/api/support-chat/{self.client_user.uuid}/'
+        )
+        self.assertEqual(thread_by_uuid.status_code, 200)
+        self.assertEqual(thread_by_uuid.json()['results'][0]['is_read'], True)
+
+        # L'admin répond au client
         reply = self.client.post(
             f'/api/support-chat/{self.client_user.pk}/',
             {'body': 'Nous vous aidons'},
             format='json',
         )
         self.assertEqual(reply.status_code, 201, reply.data)
+        self.assertTrue(reply.json()['is_from_admin'])
+
         thread = self.client.get(f'/api/support-chat/{self.client_user.pk}/')
         self.assertEqual(thread.status_code, 200)
         self.assertEqual(len(thread.json()['results']), 2)
+
+        # Quand le client ouvre son fil, la réponse de l'admin passe à lue
+        self.client.force_authenticate(self.client_user)
+        client_view = self.client.get('/api/support-chat/')
+        self.assertEqual(client_view.status_code, 200)
+        self.assertTrue(
+            all(m['is_read'] for m in client_view.json()['results'])
+        )
+
+        # Envoi d'une photo jointe dans le chat
+        image = BytesIO()
+        Image.new('RGB', (12, 12), color=(255, 220, 0)).save(
+            image, format='JPEG'
+        )
+        photo = SimpleUploadedFile(
+            'capture.jpg',
+            image.getvalue(),
+            content_type='image/jpeg',
+        )
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                with_photo = self.client.post(
+                    '/api/support-chat/',
+                    {'body': 'Voici la capture', 'attachment': photo},
+                    format='multipart',
+                )
+                self.assertEqual(with_photo.status_code, 201, with_photo.data)
+                self.assertTrue(
+                    (with_photo.json().get('attachment_url') or '').endswith(
+                        '.jpg'
+                    )
+                )

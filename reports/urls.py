@@ -35,7 +35,7 @@ urlpatterns = [
     ),
     path('support-chat/', SupportChatView.as_view(), name='support-chat'),
     path(
-        'support-chat/<int:client_id>/',
+        'support-chat/<str:client_id>/',
         SupportChatView.as_view(),
         name='support-chat-client',
     ),

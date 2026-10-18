@@ -1,4 +1,4 @@
-"""Génération du reçu PDF (maquette Bujito Digital)."""
+"""Génération du reçu PDF (maquette Bujito Digital) — multi-pages, sans chevauchement."""
 from __future__ import annotations
 
 import io
@@ -7,13 +7,13 @@ from pathlib import Path
 
 import qrcode
 from django.utils import timezone
-from reportlab.lib.colors import Color, HexColor, white, black
+from reportlab.lib.colors import Color, HexColor, white
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader, simpleSplit
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
 
 YELLOW = HexColor("#FBD600")
 DARK = HexColor("#111111")
@@ -22,10 +22,9 @@ GREY_BOX = HexColor("#F2F2F2")
 GREY_TEXT = HexColor("#666666")
 GREEN = HexColor("#28A745")
 ORANGE_M = HexColor("#FF7900")
+LIGHT_LINE = HexColor("#DDDDDD")
 
 ASSETS = Path(__file__).resolve().parent / "assets"
-LOGO_PATH = ASSETS / "logo.png"
-
 _FONTS_READY = False
 
 
@@ -33,23 +32,21 @@ def _ensure_fonts():
     global _FONTS_READY
     if _FONTS_READY:
         return
-    regular = [
+    for path in (
         r"C:\Windows\Fonts\arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
-    bold = [
-        r"C:\Windows\Fonts\arialbd.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    ]
-    for path in regular:
+    ):
         try:
             pdfmetrics.registerFont(TTFont("ReceiptSans", path))
             break
         except Exception:
             continue
-    for path in bold:
+    for path in (
+        r"C:\Windows\Fonts\arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ):
         try:
             pdfmetrics.registerFont(TTFont("ReceiptSans-Bold", path))
             break
@@ -60,9 +57,10 @@ def _ensure_fonts():
 
 def _font(bold: bool = False) -> str:
     _ensure_fonts()
-    if bold and "ReceiptSans-Bold" in pdfmetrics.getRegisteredFontNames():
+    names = pdfmetrics.getRegisteredFontNames()
+    if bold and "ReceiptSans-Bold" in names:
         return "ReceiptSans-Bold"
-    if "ReceiptSans" in pdfmetrics.getRegisteredFontNames():
+    if "ReceiptSans" in names:
         return "ReceiptSans"
     return "Helvetica-Bold" if bold else "Helvetica"
 
@@ -77,14 +75,11 @@ def _money(amount, currency: str) -> str:
         return f"{value.quantize(Decimal('1'))} {code}"
     if code == "CNY":
         return f"{value.quantize(Decimal('0.01'))} ¥"
-    # Format FR-like : 50,00 $
     q = value.quantize(Decimal("0.01"))
-    text = f"{q}".replace(".", ",")
-    return f"{text} $"
+    return f"{str(q).replace('.', ',')} $"
 
 
 def _service_copy(payment, meta: dict) -> tuple[str, str, str]:
-    tracking = ""
     if payment.order_id:
         return (
             "Achat de produits en Chine",
@@ -104,6 +99,28 @@ def _service_copy(payment, meta: dict) -> tuple[str, str, str]:
             payment.reference or "",
         )
     return "Paiement Bujito", "Service Bujito Digital", ""
+
+
+def _extra_service_rows(meta: dict) -> list[tuple[str, str]]:
+    """Lignes additionnelles (produits, note…) pour le détail service."""
+    rows: list[tuple[str, str]] = []
+    items = meta.get("product_items") or meta.get("items") or []
+    if isinstance(items, list):
+        for idx, item in enumerate(items, start=1):
+            if isinstance(item, dict):
+                label = (item.get("description") or item.get("name") or f"Article {idx}").strip()
+                qty = item.get("quantity") or item.get("qty") or 1
+                price = item.get("price") or item.get("amount")
+                value = f"x{qty}"
+                if price is not None:
+                    value = f"{value} · {_money(price, 'USD')}"
+                rows.append((f"Article {idx} :", f"{label} ({value})"))
+            else:
+                rows.append((f"Article {idx} :", str(item)))
+    note = (meta.get("note") or meta.get("admin_note") or "").strip()
+    if note:
+        rows.append(("Note :", note))
+    return rows
 
 
 def _rounded_rect(c, x, y, w, h, r, fill=None, stroke=None, stroke_width=0.5):
@@ -134,46 +151,24 @@ def _rounded_rect(c, x, y, w, h, r, fill=None, stroke=None, stroke_width=0.5):
 
 
 def _draw_logo_mark(c, x, y, size=22):
-    """Cercle jaune « bu. »."""
     c.setFillColor(YELLOW)
     c.circle(x + size / 2, y + size / 2, size / 2, fill=1, stroke=0)
     c.setFillColor(DARK)
-    c.setFont(_font(True), size * 0.42)
+    c.setFont(_font(True), max(6, size * 0.42))
     c.drawCentredString(x + size / 2, y + size * 0.32, "bu.")
 
 
-def _draw_brand(c, x, y, mark_size=22, title_size=14):
+def _draw_brand(c, x, y, mark_size=22, title_size=14, light=True):
     _draw_logo_mark(c, x, y, mark_size)
     c.setFont(_font(True), title_size)
-    c.setFillColor(white)
+    c.setFillColor(white if light else DARK)
     c.drawString(x + mark_size + 6, y + mark_size * 0.55, "Bujito")
     w = c.stringWidth("Bujito", _font(True), title_size)
-    c.setFillColor(YELLOW)
+    c.setFillColor(YELLOW if light else HexColor("#C9A000"))
     c.drawString(x + mark_size + 6 + w + 3, y + mark_size * 0.55, "Digital")
-    c.setFillColor(Color(1, 1, 1, alpha=0.85))
+    c.setFillColor(Color(1, 1, 1, alpha=0.85) if light else GREY_TEXT)
     c.setFont(_font(), 7)
-    c.drawString(
-        x + mark_size + 6,
-        y + 2,
-        "Vos services digitaux, notre priorité !",
-    )
-
-
-def _draw_brand_dark(c, x, y, mark_size=20, title_size=12):
-    _draw_logo_mark(c, x, y, mark_size)
-    c.setFont(_font(True), title_size)
-    c.setFillColor(DARK)
-    c.drawString(x + mark_size + 6, y + mark_size * 0.55, "Bujito")
-    w = c.stringWidth("Bujito", _font(True), title_size)
-    c.setFillColor(HexColor("#C9A000"))
-    c.drawString(x + mark_size + 6 + w + 3, y + mark_size * 0.55, "Digital")
-    c.setFillColor(GREY_TEXT)
-    c.setFont(_font(), 6.5)
-    c.drawString(
-        x + mark_size + 6,
-        y + 2,
-        "Vos services digitaux, notre priorité !",
-    )
+    c.drawString(x + mark_size + 6, y + 2, "Vos services digitaux, notre priorité !")
 
 
 def _qr_image(payload: str) -> ImageReader:
@@ -185,6 +180,111 @@ def _qr_image(payload: str) -> ImageReader:
     img.save(buf, format="PNG")
     buf.seek(0)
     return ImageReader(buf)
+
+
+class _ReceiptLayout:
+    """Curseur Y + en-tête/pied de page + saut de page automatique."""
+
+    def __init__(self, c: canvas.Canvas, width: float, height: float):
+        self.c = c
+        self.width = width
+        self.height = height
+        self.margin = 15 * mm
+        self.footer_h = 16 * mm
+        self.header_h = 30 * mm
+        self.content_bottom = self.footer_h + 8 * mm
+        self.y = height
+        self.page = 1
+        self._draw_header(full=True)
+        self.y = height - self.header_h - 10 * mm
+
+    def _draw_header(self, full: bool = True):
+        c, w, h = self.c, self.width, self.height
+        hh = self.header_h if full else 22 * mm
+        c.setFillColor(DARK)
+        c.rect(0, h - hh, w, hh, fill=1, stroke=0)
+        c.setFillColor(YELLOW)
+        path = c.beginPath()
+        path.moveTo(0, h)
+        path.lineTo(24 * mm, h)
+        path.lineTo(0, h - 14 * mm)
+        path.close()
+        c.drawPath(path, fill=1, stroke=0)
+        path = c.beginPath()
+        path.moveTo(w, h)
+        path.lineTo(w - 24 * mm, h)
+        path.lineTo(w, h - 14 * mm)
+        path.close()
+        c.drawPath(path, fill=1, stroke=0)
+
+        _draw_brand(
+            c,
+            self.margin,
+            h - (26 * mm if full else 16 * mm),
+            mark_size=22 if full else 16,
+            title_size=14 if full else 11,
+            light=True,
+        )
+        if full:
+            services = (
+                "Achat en Chine",
+                "Commande en ligne",
+                "Assistance & Conseils",
+                "Paiement sécurisé",
+            )
+            sy = h - 12 * mm
+            for label in services:
+                c.setFillColor(YELLOW)
+                c.setFont(_font(True), 8)
+                # Décaler à gauche pour ne pas chevaucher le triangle jaune.
+                c.drawRightString(w - self.margin - 70, sy, "●")
+                c.setFillColor(white)
+                c.setFont(_font(), 8)
+                c.drawRightString(w - self.margin - 12, sy, label)
+                sy -= 10
+        else:
+            c.setFillColor(white)
+            c.setFont(_font(), 8)
+            c.drawRightString(w - self.margin, h - 12 * mm, f"Page {self.page}")
+
+    def _draw_footer(self):
+        c, w = self.c, self.width
+        c.setFillColor(DARK)
+        c.rect(0, 0, w, self.footer_h, fill=1, stroke=0)
+        c.setFillColor(YELLOW)
+        path = c.beginPath()
+        path.moveTo(w, 0)
+        path.lineTo(w, 20 * mm)
+        path.lineTo(w - 42 * mm, 0)
+        path.close()
+        c.drawPath(path, fill=1, stroke=0)
+        c.setFillColor(YELLOW)
+        c.setFont(_font(), 8)
+        c.drawString(self.margin, 7 * mm, "+243 858 850 051")
+        c.drawCentredString(w / 2, 7 * mm, "www.bujitodigital.com")
+        c.setFillColor(DARK)
+        c.setFont(_font(True), 7)
+        c.drawRightString(w - 5 * mm, 5 * mm, "Ensemble vers plus")
+        c.drawRightString(w - 5 * mm, 2 * mm, "d'opportunités !")
+
+    def new_page(self):
+        self._draw_footer()
+        self.c.showPage()
+        self.page += 1
+        self._draw_header(full=False)
+        self.y = self.height - 22 * mm - 12 * mm
+
+    def ensure(self, needed: float):
+        if self.y - needed < self.content_bottom:
+            self.new_page()
+
+    def space(self, amount: float):
+        self.ensure(amount)
+        self.y -= amount
+
+    def finish(self):
+        """Dessine le pied de page final sans ouvrir une page vide."""
+        self._draw_footer()
 
 
 def build_receipt_pdf(payment) -> bytes:
@@ -233,205 +333,247 @@ def build_receipt_pdf(payment) -> bytes:
     buf = io.BytesIO()
     width, height = A4
     c = canvas.Canvas(buf, pagesize=A4)
-    margin = 18 * mm
-
-    # --- Header noir ---
-    header_h = 38 * mm
-    c.setFillColor(DARK)
-    c.rect(0, height - header_h, width, header_h, fill=1, stroke=0)
-    # Accents jaunes coins
-    c.setFillColor(YELLOW)
-    path = c.beginPath()
-    path.moveTo(0, height)
-    path.lineTo(28 * mm, height)
-    path.lineTo(0, height - 18 * mm)
-    path.close()
-    c.drawPath(path, fill=1, stroke=0)
-    path = c.beginPath()
-    path.moveTo(width, height)
-    path.lineTo(width - 28 * mm, height)
-    path.lineTo(width, height - 18 * mm)
-    path.close()
-    c.drawPath(path, fill=1, stroke=0)
-
-    _draw_brand(c, margin, height - 28 * mm, mark_size=24, title_size=15)
-
-    services = [
-        ("●", "Achat en Chine"),
-        ("●", "Commande en ligne"),
-        ("●", "Assistance & Conseils"),
-        ("●", "Paiement sécurisé"),
-    ]
-    sy = height - 16 * mm
-    for icon, label in services:
-        c.setFillColor(YELLOW)
-        c.setFont(_font(True), 8)
-        c.drawRightString(width - margin - 55, sy, icon)
-        c.setFillColor(white)
-        c.setFont(_font(), 8)
-        c.drawRightString(width - margin, sy, label)
-        sy -= 11
+    layout = _ReceiptLayout(c, width, height)
+    margin = layout.margin
+    content_w = width - 2 * margin
+    label_w = 44 * mm
 
     # --- Titre + badge PAYÉ ---
-    y = height - header_h - 18 * mm
-    c.setFillColor(DARK)
-    c.setFont(_font(True), 18)
-    c.drawString(margin + 18, y, "REÇU DE PAIEMENT")
-    c.setFillColor(GREY_TEXT)
-    c.setFont(_font(), 9)
-    c.drawString(margin + 18, y - 12, "MERCI POUR VOTRE CONFIANCE !")
-    # petite icône reçu
+    layout.ensure(18 * mm)
+    y = layout.y
     c.setStrokeColor(DARK)
     c.setLineWidth(1.2)
-    c.rect(margin, y - 4, 12, 16, fill=0, stroke=1)
-    c.line(margin + 3, y + 8, margin + 9, y + 8)
-    c.line(margin + 3, y + 4, margin + 9, y + 4)
+    c.rect(margin, y - 2, 11, 14, fill=0, stroke=1)
+    c.line(margin + 2.5, y + 8, margin + 8.5, y + 8)
+    c.line(margin + 2.5, y + 4, margin + 8.5, y + 4)
+    c.setFillColor(DARK)
+    c.setFont(_font(True), 16)
+    c.drawString(margin + 16, y, "REÇU DE PAIEMENT")
+    c.setFillColor(GREY_TEXT)
+    c.setFont(_font(), 8)
+    c.drawString(margin + 16, y - 11, "MERCI POUR VOTRE CONFIANCE !")
 
-    badge_w, badge_h = 42 * mm, 10 * mm
+    badge_w, badge_h = 38 * mm, 9 * mm
     bx = width - margin - badge_w
-    by = y - 4
-    _rounded_rect(c, bx, by, badge_w, badge_h, 5 * mm, fill=YELLOW)
+    by = y - 3
+    _rounded_rect(c, bx, by, badge_w, badge_h, 4.5 * mm, fill=YELLOW)
     c.setFillColor(DARK)
-    c.circle(bx + 7 * mm, by + badge_h / 2, 3.2 * mm, fill=1, stroke=0)
+    c.circle(bx + 6 * mm, by + badge_h / 2, 2.8 * mm, fill=1, stroke=0)
     c.setFillColor(white)
-    c.setFont(_font(True), 9)
-    c.drawCentredString(bx + 7 * mm, by + badge_h / 2 - 3, "✓")
+    c.setFont(_font(True), 8)
+    c.drawCentredString(bx + 6 * mm, by + badge_h / 2 - 2.5, "✓")
     c.setFillColor(DARK)
-    c.setFont(_font(True), 12)
-    c.drawString(bx + 13 * mm, by + badge_h / 2 - 4, "PAYÉ")
+    c.setFont(_font(True), 11)
+    c.drawString(bx + 11 * mm, by + badge_h / 2 - 3.5, "PAYÉ")
+    layout.y = y - 18 * mm
 
     # --- Infos client ---
-    y = by - 18 * mm
-    left_x = margin
-    lines = [
-        ("Numéro de reçu :", receipt_no),
-        ("Nom du client :", client_name),
-        ("Téléphone :", phone),
-        ("Email :", email),
+    layout.ensure(32 * mm)
+    info_top = layout.y
+    client_rows = [
+        ("Numéro de reçu :", str(receipt_no)),
+        ("Nom du client :", str(client_name)),
+        ("Téléphone :", str(phone)),
+        ("Email :", str(email)),
     ]
-    row_y = y
-    for label, value in lines:
+    row_y = info_top
+    for label, value in client_rows:
         c.setFillColor(DARK)
         c.setFont(_font(), 9)
-        c.drawString(left_x, row_y, label)
+        c.drawString(margin, row_y, label)
         c.setFont(_font(True), 9)
-        c.drawString(left_x + 38 * mm, row_y, str(value))
-        row_y -= 12
+        wrapped = simpleSplit(value, _font(True), 9, content_w / 2 - 42 * mm)
+        for i, line in enumerate(wrapped[:2]):
+            c.drawString(margin + 38 * mm, row_y - i * 10, line)
+        row_y -= max(12, 10 * min(len(wrapped), 2) + 2)
 
-    # séparateur vertical + logo droit
-    mid_x = width / 2 + 8 * mm
-    c.setStrokeColor(HexColor("#DDDDDD"))
+    mid_x = width / 2 + 6 * mm
+    c.setStrokeColor(LIGHT_LINE)
     c.setLineWidth(0.8)
-    c.line(mid_x - 6 * mm, y + 6, mid_x - 6 * mm, row_y + 8)
-    _draw_brand_dark(c, mid_x, y - 10, mark_size=20, title_size=11)
+    c.line(mid_x - 4 * mm, info_top + 4, mid_x - 4 * mm, row_y + 8)
+    _draw_brand(c, mid_x, info_top - 12, mark_size=16, title_size=10, light=False)
+    layout.y = min(row_y, info_top - 24 * mm) - 7 * mm
 
-    # --- DÉTAIL DU SERVICE ---
-    box_top = row_y - 8 * mm
-    box_x = margin
-    box_w = width - 2 * margin
-    header_bar_h = 9 * mm
-    body_h = 38 * mm
-    total_h = 11 * mm
-    box_h = header_bar_h + body_h + total_h
+    def _kv_block(title: str, rows: list[tuple[str, str]], *, trailing_total=None):
+        """Bloc gris à en-tête sombre, lignes label/valeur, total jaune optionnel."""
+        nonlocal layout
+        line_gap = 13
+        pad_x = 5 * mm
+        header_h = 9 * mm
+        total_h = 11 * mm if trailing_total else 0
+        # Pré-calcul hauteur (avec wrap)
+        body_h = 7 * mm
+        prepared: list[tuple[str, list[str]]] = []
+        value_w = content_w - label_w - 2 * pad_x
+        for label, value in rows:
+            lines = simpleSplit(str(value), _font(True), 9, value_w) or [""]
+            prepared.append((label, lines))
+            body_h += max(line_gap, 10 * len(lines) + 3)
 
-    _rounded_rect(c, box_x, box_top - box_h, box_w, box_h, 3 * mm, fill=GREY_BOX)
-    c.setFillColor(GREY_BAR)
-    c.roundRect(box_x, box_top - header_bar_h, box_w, header_bar_h, 3 * mm, fill=1, stroke=0)
-    # couvrir coins bas de la barre
-    c.rect(box_x, box_top - header_bar_h, box_w, 3 * mm, fill=1, stroke=0)
-    c.setFillColor(YELLOW)
-    c.setFont(_font(True), 10)
-    c.drawString(box_x + 4 * mm, box_top - 6.2 * mm, "⚙")
-    c.setFillColor(white)
-    c.setFont(_font(True), 10)
-    c.drawString(box_x + 10 * mm, box_top - 6.2 * mm, "DÉTAIL DU SERVICE")
+        # Dessiner éventuellement sur plusieurs pages : on découpe les lignes
+        idx = 0
+        first_chunk = True
+        while idx < len(prepared) or (first_chunk and not prepared):
+            layout.ensure(header_h + 28 * mm + (total_h if idx >= len(prepared) - 1 else 0))
+            # Combien de lignes tiennent sur cette page ?
+            avail = layout.y - layout.content_bottom - header_h - 6 * mm
+            if trailing_total and idx + 1 >= len(prepared):
+                avail -= total_h + 4 * mm
+            chunk: list[tuple[str, list[str]]] = []
+            used = 8 * mm
+            while idx < len(prepared):
+                label, lines = prepared[idx]
+                need = max(line_gap, 11 * len(lines) + 4)
+                if chunk and used + need > avail:
+                    break
+                if not chunk and need > avail:
+                    # forcer au moins une ligne (éventuellement tronquée)
+                    lines = lines[: max(1, int((avail - 8 * mm) / 11))]
+                    need = max(line_gap, 11 * len(lines) + 4)
+                chunk.append((label, lines))
+                used += need
+                idx += 1
 
-    detail_y = box_top - header_bar_h - 8 * mm
-    details = [
+            chunk_body = used
+            show_total = trailing_total is not None and idx >= len(prepared)
+            box_h = header_h + chunk_body + (total_h if show_total else 4 * mm)
+            layout.ensure(box_h + 4 * mm)
+            box_top = layout.y
+            box_x = margin
+
+            _rounded_rect(c, box_x, box_top - box_h, content_w, box_h, 3 * mm, fill=GREY_BOX)
+            c.setFillColor(GREY_BAR)
+            c.roundRect(box_x, box_top - header_h, content_w, header_h, 3 * mm, fill=1, stroke=0)
+            c.rect(box_x, box_top - header_h, content_w, 3 * mm, fill=1, stroke=0)
+            c.setFillColor(white)
+            c.setFont(_font(True), 10)
+            suffix = "" if first_chunk else " (suite)"
+            c.drawString(box_x + pad_x, box_top - 6.8 * mm, f"{title}{suffix}")
+
+            cy = box_top - header_h - 8 * mm
+            for label, lines in chunk:
+                c.setFillColor(DARK)
+                c.setFont(_font(), 9)
+                c.drawString(box_x + pad_x, cy, label)
+                c.setFont(_font(True), 9)
+                for i, line in enumerate(lines):
+                    c.drawString(box_x + pad_x + label_w, cy - i * 11, line)
+                cy -= max(line_gap, 11 * len(lines) + 4)
+
+            if show_total:
+                total_label, total_value = trailing_total
+                ty = box_top - box_h + 2.5 * mm
+                _rounded_rect(
+                    c,
+                    box_x + 3 * mm,
+                    ty,
+                    content_w - 6 * mm,
+                    total_h - 3 * mm,
+                    4 * mm,
+                    fill=YELLOW,
+                )
+                c.setFillColor(DARK)
+                c.setFont(_font(True), 10)
+                c.drawString(box_x + 10 * mm, ty + 4.5, total_label)
+                c.setFont(_font(True), 13)
+                c.drawRightString(box_x + content_w - 8 * mm, ty + 4, total_value)
+
+            layout.y = box_top - box_h - 8 * mm
+            first_chunk = False
+            if not prepared:
+                break
+
+    service_rows = [
         ("Service payé :", service_label),
         ("Description :", description),
     ]
     if tracking:
-        details.append(("Référence / suivi :", tracking))
-    details.extend(
+        service_rows.append(("Référence / suivi :", tracking))
+    service_rows.extend(_extra_service_rows(meta))
+    service_rows.extend(
         [
             ("Montant :", _money(service_amount, payment.currency)),
             ("Frais de traitement :", _money(fee, payment.currency)),
         ]
     )
-    for label, value in details:
-        c.setFillColor(DARK)
-        c.setFont(_font(), 9)
-        c.drawString(box_x + 5 * mm, detail_y, label)
-        c.setFont(_font(True), 9)
-        c.drawString(box_x + 42 * mm, detail_y, str(value))
-        detail_y -= 11
+    _kv_block(
+        "DÉTAIL DU SERVICE",
+        service_rows,
+        trailing_total=("MONTANT TOTAL PAYÉ", _money(total, payment.currency)),
+    )
 
-    # barre jaune total
-    ty = box_top - box_h + 2 * mm
-    _rounded_rect(c, box_x + 3 * mm, ty, box_w - 6 * mm, total_h - 3 * mm, 4 * mm, fill=YELLOW)
-    c.setFillColor(DARK)
-    c.setFont(_font(True), 10)
-    c.drawString(box_x + 10 * mm, ty + 4, "MONTANT TOTAL PAYÉ")
-    c.setFont(_font(True), 13)
-    total_txt = _money(total, payment.currency)
-    c.drawRightString(box_x + box_w - 8 * mm, ty + 3.5, total_txt)
-
-    # --- DÉTAIL DU PAIEMENT ---
-    pay_top = ty - 10 * mm
-    pay_body_h = 36 * mm
-    pay_h = header_bar_h + pay_body_h
-    _rounded_rect(c, box_x, pay_top - pay_h, box_w, pay_h, 3 * mm, fill=GREY_BOX)
+    # --- DÉTAIL DU PAIEMENT (lignes aérées, badge statut sans overlap) ---
+    header_h = 9 * mm
+    row_step = 14
+    status_h = 8.5 * mm
+    top_pad = 10 * mm
+    # 3 lignes texte + espace dédié au badge (hauteur badge + marge)
+    body_h = top_pad + 3 * row_step + 10 + status_h + 6 * mm
+    box_h = header_h + body_h
+    layout.ensure(box_h + 8 * mm)
+    box_top = layout.y
+    box_x = margin
+    _rounded_rect(c, box_x, box_top - box_h, content_w, box_h, 3 * mm, fill=GREY_BOX)
     c.setFillColor(GREY_BAR)
-    c.roundRect(box_x, pay_top - header_bar_h, box_w, header_bar_h, 3 * mm, fill=1, stroke=0)
-    c.rect(box_x, pay_top - header_bar_h, box_w, 3 * mm, fill=1, stroke=0)
-    c.setFillColor(YELLOW)
-    c.setFont(_font(True), 10)
-    c.drawString(box_x + 4 * mm, pay_top - 6.2 * mm, "💳")
+    c.roundRect(box_x, box_top - header_h, content_w, header_h, 3 * mm, fill=1, stroke=0)
+    c.rect(box_x, box_top - header_h, content_w, 3 * mm, fill=1, stroke=0)
     c.setFillColor(white)
     c.setFont(_font(True), 10)
-    c.drawString(box_x + 12 * mm, pay_top - 6.2 * mm, "DÉTAIL DU PAIEMENT")
+    c.drawString(box_x + 5 * mm, box_top - 6.2 * mm, "DÉTAIL DU PAIEMENT")
 
-    py = pay_top - header_bar_h - 9 * mm
+    py = box_top - header_h - top_pad
+
     c.setFillColor(DARK)
     c.setFont(_font(), 9)
     c.drawString(box_x + 5 * mm, py, "Mode de paiement :")
     c.setFont(_font(True), 9)
-    c.drawString(box_x + 42 * mm, py, str(method))
+    c.drawString(box_x + 5 * mm + label_w, py, str(method))
     if "orange" in method_code or "orange" in str(method).lower():
         c.setFillColor(ORANGE_M)
-        c.roundRect(box_x + box_w - 38 * mm, py - 2, 30 * mm, 8 * mm, 2 * mm, fill=1, stroke=0)
+        c.roundRect(box_x + content_w - 36 * mm, py - 2, 28 * mm, 8 * mm, 2 * mm, fill=1, stroke=0)
         c.setFillColor(white)
         c.setFont(_font(True), 7)
-        c.drawCentredString(box_x + box_w - 23 * mm, py, "Orange Money")
+        c.drawCentredString(box_x + content_w - 22 * mm, py, "Orange Money")
+    py -= row_step
 
-    py -= 13
     c.setFillColor(DARK)
     c.setFont(_font(), 9)
     c.drawString(box_x + 5 * mm, py, "Numéro de transaction :")
     c.setFont(_font(True), 9)
-    c.drawString(box_x + 48 * mm, py, str(tx_no))
-    py -= 13
+    tx_lines = simpleSplit(str(tx_no), _font(True), 9, content_w - label_w - 12 * mm)
+    c.drawString(box_x + 5 * mm + label_w, py, tx_lines[0] if tx_lines else "")
+    py -= row_step
+
     c.setFont(_font(), 9)
     c.drawString(box_x + 5 * mm, py, "Date de paiement :")
     c.setFont(_font(True), 9)
-    c.drawString(box_x + 42 * mm, py, date_label)
-    py -= 14
+    c.drawString(box_x + 5 * mm + label_w, py, date_label)
+    # Espace clair sous la date avant le badge (évite le chevauchement).
+    py -= row_step + 8
+
     c.setFont(_font(), 9)
-    c.drawString(box_x + 5 * mm, py, "Statut :")
-    status_w = 42 * mm
-    _rounded_rect(c, box_x + 28 * mm, py - 3, status_w, 8 * mm, 4 * mm, fill=GREEN)
+    c.drawString(box_x + 5 * mm, py + 1, "Statut :")
+    status_w = 44 * mm
+    sx = box_x + 5 * mm + label_w
+    badge_bottom = py - (status_h / 2) + 2
+    _rounded_rect(c, sx, badge_bottom, status_w, status_h, 4.2 * mm, fill=GREEN)
     c.setFillColor(white)
     c.setFont(_font(True), 8)
-    c.drawCentredString(box_x + 28 * mm + status_w / 2, py - 0.5, "✓  Paiement confirmé")
+    c.drawCentredString(
+        sx + status_w / 2,
+        badge_bottom + status_h / 2 - 2.8,
+        "✓  Paiement confirmé",
+    )
+
+    layout.y = box_top - box_h - 8 * mm
 
     # --- QR + Merci ---
-    foot_y = pay_top - pay_h - 8 * mm
+    qr_size = 24 * mm
+    layout.ensure(qr_size + 6 * mm)
+    foot_y = layout.y
     verify_url = f"https://www.bujitodigital.com/verify/{receipt_no}"
     qr = _qr_image(verify_url)
-    qr_size = 28 * mm
     c.drawImage(qr, margin, foot_y - qr_size, qr_size, qr_size, mask="auto")
-    # petit logo au centre du QR
     c.setFillColor(YELLOW)
     c.circle(margin + qr_size / 2, foot_y - qr_size / 2, 5 * mm, fill=1, stroke=0)
     c.setFillColor(DARK)
@@ -440,52 +582,31 @@ def build_receipt_pdf(payment) -> bytes:
 
     c.setFillColor(GREY_TEXT)
     c.setFont(_font(), 8)
-    text_x = margin + qr_size + 4 * mm
+    text_x = margin + qr_size + 5 * mm
     c.drawString(text_x, foot_y - 10 * mm, "Scannez ce QR code pour vérifier")
     c.drawString(text_x, foot_y - 14 * mm, "l'authenticité de votre reçu.")
 
-    c.setStrokeColor(HexColor("#DDDDDD"))
+    c.setStrokeColor(LIGHT_LINE)
     c.setLineWidth(0.8)
-    c.line(width / 2 + 5 * mm, foot_y - 2 * mm, width / 2 + 5 * mm, foot_y - qr_size + 2 * mm)
+    c.line(width / 2 + 4 * mm, foot_y - 2 * mm, width / 2 + 4 * mm, foot_y - qr_size + 2 * mm)
 
     c.setFillColor(DARK)
-    c.setFont(_font(True), 22)
-    c.drawString(width / 2 + 12 * mm, foot_y - 10 * mm, "Merci !")
+    c.setFont(_font(True), 20)
+    c.drawString(width / 2 + 10 * mm, foot_y - 10 * mm, "Merci !")
     c.setStrokeColor(YELLOW)
     c.setLineWidth(2.5)
-    c.line(width / 2 + 12 * mm, foot_y - 12 * mm, width / 2 + 40 * mm, foot_y - 12 * mm)
+    c.line(width / 2 + 10 * mm, foot_y - 12 * mm, width / 2 + 38 * mm, foot_y - 12 * mm)
     c.setFillColor(GREY_TEXT)
     c.setFont(_font(), 8)
-    c.drawString(width / 2 + 12 * mm, foot_y - 18 * mm, "Votre confiance nous motive !")
-    c.drawString(width / 2 + 12 * mm, foot_y - 22 * mm, "Bujito Digital, toujours à vos côtés.")
+    c.drawString(width / 2 + 10 * mm, foot_y - 18 * mm, "Votre confiance nous motive !")
+    c.drawString(width / 2 + 10 * mm, foot_y - 22 * mm, "Bujito Digital, toujours à vos côtés.")
 
-    # --- Footer noir ---
-    footer_h = 16 * mm
-    c.setFillColor(DARK)
-    c.rect(0, 0, width, footer_h, fill=1, stroke=0)
-    c.setFillColor(YELLOW)
-    path = c.beginPath()
-    path.moveTo(width, 0)
-    path.lineTo(width, 22 * mm)
-    path.lineTo(width - 45 * mm, 0)
-    path.close()
-    c.drawPath(path, fill=1, stroke=0)
-
-    c.setFillColor(YELLOW)
-    c.setFont(_font(), 8)
-    c.drawString(margin, 6 * mm, "☎  +243 858 850 051")
-    c.drawCentredString(width / 2, 6 * mm, "🌐  www.bujitodigital.com")
-    c.setFillColor(DARK)
-    c.setFont(_font(True), 7)
-    c.drawRightString(width - 4 * mm, 4 * mm, "Ensemble vers plus")
-    c.drawRightString(width - 4 * mm, 1.5 * mm, "d'opportunités !")
-
-    c.showPage()
+    layout.y = foot_y - qr_size - 6 * mm
+    layout.finish()
     c.save()
     return buf.getvalue()
 
 
-# Compat anciens imports / tests
 def build_receipt_png(payment) -> bytes:
-    """Deprecated : le reçu officiel est un PDF. Conservé pour compat."""
+    """Deprecated : le reçu officiel est un PDF."""
     return build_receipt_pdf(payment)

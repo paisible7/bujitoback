@@ -128,6 +128,8 @@ class PaymentInitiationTests(APITestCase):
         # Artefact local pour inspection visuelle du rendu maquette.
         from pathlib import Path
 
+        import pymupdf
+
         out = (
             Path(__file__).resolve().parents[1].parent
             / "bujitodigital"
@@ -136,6 +138,8 @@ class PaymentInitiationTests(APITestCase):
         )
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(receipt.content)
+        doc = pymupdf.open(stream=receipt.content, filetype="pdf")
+        self.assertEqual(doc.page_count, 1, "Un reçu court doit tenir sur une page")
 
         pending = Payment.objects.create(
             user=self.user,
@@ -148,6 +152,53 @@ class PaymentInitiationTests(APITestCase):
         )
         bad = self.client.get(reverse("payment-receipt", kwargs={"pk": pending.pk}))
         self.assertEqual(bad.status_code, 400)
+
+    def test_receipt_pdf_paginates_when_many_service_lines(self):
+        import io
+
+        import pymupdf
+
+        from .receipt import build_receipt_pdf
+
+        order = Order.objects.create(
+            user=self.user,
+            quote_ready=True,
+            total_amount=Decimal("120.00"),
+        )
+        payment = Payment.objects.create(
+            user=self.user,
+            order=order,
+            amount=Decimal("120.00"),
+            currency="USD",
+            reference="PAY-MULTI-PAGE",
+            method=self.method,
+            status="completed",
+            provider_raw_response={
+                "type": "order",
+                "service_amount": "120.00",
+                "processing_fee": "0.00",
+                "product_items": [
+                    {
+                        "description": f"Produit volumineux numéro {i} avec détail long",
+                        "quantity": i,
+                        "price": "10.00",
+                    }
+                    for i in range(1, 28)
+                ],
+            },
+        )
+        pdf = build_receipt_pdf(payment)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        doc = pymupdf.open(stream=pdf, filetype="pdf")
+        self.assertGreaterEqual(doc.page_count, 2)
+        multipage_out = (
+            __import__("pathlib").Path(__file__).resolve().parents[1].parent
+            / "bujitodigital"
+            / "tool"
+            / "receipt_multipage_django_test.pdf"
+        )
+        multipage_out.parent.mkdir(parents=True, exist_ok=True)
+        multipage_out.write_bytes(pdf)
 
     def test_card_payment_completes_existing_pending_payment(self):
         order = Order.objects.create(

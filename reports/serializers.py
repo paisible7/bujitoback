@@ -153,21 +153,40 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
 
 class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     sender_name = serializers.SerializerMethodField()
+    client_name = serializers.SerializerMethodField()
+    client_email = serializers.SerializerMethodField()
     is_from_admin = serializers.SerializerMethodField()
+    attachment_url = serializers.SerializerMethodField()
 
     class Meta:
         model = SupportMessage
         fields = (
-            'id', 'client', 'sender', 'sender_name', 'is_from_admin',
-            'body', 'created_at',
+            'id', 'client', 'client_name', 'client_email',
+            'sender', 'sender_name', 'is_from_admin',
+            'body', 'attachment_url', 'is_read', 'created_at',
         )
         read_only_fields = (
-            'id', 'client', 'sender', 'sender_name', 'is_from_admin', 'created_at',
+            'id', 'client', 'client_name', 'client_email',
+            'sender', 'sender_name', 'is_from_admin',
+            'attachment_url', 'is_read', 'created_at',
         )
 
     def get_sender_name(self, obj):
         return (getattr(obj.sender, 'full_name', '') or '').strip() or obj.sender.email
 
+    def get_client_name(self, obj):
+        return (getattr(obj.client, 'full_name', '') or '').strip() or obj.client.email
+
+    def get_client_email(self, obj):
+        return getattr(obj.client, 'email', '') or ''
+
     def get_is_from_admin(self, obj):
         from users.roles import is_app_admin
         return is_app_admin(obj.sender)
+
+    def get_attachment_url(self, obj):
+        return absolute_media_url(
+            obj.attachment,
+            self.context.get('request'),
+            label=f'SupportMessage #{obj.pk} attachment',
+        )

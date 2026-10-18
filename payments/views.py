@@ -380,6 +380,8 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     "type": "expedition",
                     "expedition_id": expedition.pk,
                     "mode": expedition.mode,
+                    "was_grouped": bool(expedition.was_grouped),
+                    "grouping_fee": str(expedition.grouping_fee or Decimal("0.00")),
                 },
             )
         else:
