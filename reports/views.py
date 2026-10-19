@@ -21,7 +21,7 @@ from parcels.models import Order, Parcel
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 from payments.models import Payment
 from payments.serializers import PaymentSerializer
-from .models import Expense, SupportMessage
+from .models import ClientFollowUp, Expense, SupportMessage
 from .serializers import ExpenseSerializer, SupportMessageSerializer
 from users.permissions import IsAppAdmin
 from users.roles import CLIENT_ROLES, is_app_admin
@@ -562,44 +562,78 @@ class AdminAccountingExpenseDetailView(UUIDLookupMixin, generics.RetrieveUpdateD
 class AdminClientServiceView(APIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
 
+    def _find_client_user(self, raw_id: str):
+        qs = User.objects.filter(role__in=CLIENT_ROLES)
+        try:
+            pk = int(raw_id)
+            user = qs.filter(pk=pk).first()
+            if user is not None:
+                return user
+        except (TypeError, ValueError):
+            pass
+        try:
+            import uuid as _uuid
+            uid = _uuid.UUID(str(raw_id))
+            return qs.filter(uuid=uid).first()
+        except (TypeError, ValueError):
+            return None
+
     def get(self, request):
         search = (request.query_params.get('search') or '').strip()
-        qs = User.objects.filter(role__in=CLIENT_ROLES).annotate(
-            orders_count=Count('orders', distinct=True),
-            parcels_count=Count('orders__parcels', distinct=True),
-            parcels_received_count=Count(
-                'orders__parcels',
-                filter=Q(orders__parcels__status__in=PARCEL_RECEIVED_STATUSES),
-                distinct=True,
-            ),
-            parcels_sent_count=Count(
-                'orders__parcels',
-                filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
-                distinct=True,
-            ),
-            support_messages_count=Count('support_threads', distinct=True),
-            unread_support_count=Count(
-                'support_threads',
-                filter=Q(
-                    support_threads__is_read=False,
-                    support_threads__sender_id=F('id'),
-                ),
-                distinct=True,
-            ),
-            last_support_at=Max('support_threads__created_at'),
+        followup_only = (request.query_params.get('followup') or '').strip().lower() in (
+            '1',
+            'true',
+            'yes',
+            'on',
         )
+        qs = (
+            User.objects.filter(role__in=CLIENT_ROLES)
+            .select_related('support_followup')
+            .annotate(
+                orders_count=Count('orders', distinct=True),
+                parcels_count=Count('orders__parcels', distinct=True),
+                parcels_received_count=Count(
+                    'orders__parcels',
+                    filter=Q(orders__parcels__status__in=PARCEL_RECEIVED_STATUSES),
+                    distinct=True,
+                ),
+                parcels_sent_count=Count(
+                    'orders__parcels',
+                    filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
+                    distinct=True,
+                ),
+                support_messages_count=Count('support_threads', distinct=True),
+                unread_support_count=Count(
+                    'support_threads',
+                    filter=Q(
+                        support_threads__is_read=False,
+                        support_threads__sender_id=F('id'),
+                    ),
+                    distinct=True,
+                ),
+                last_support_at=Max('support_threads__created_at'),
+            )
+        )
+        if followup_only:
+            qs = qs.filter(support_followup__needs_followup=True)
         if search:
             qs = qs.filter(
                 Q(email__icontains=search)
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
+                | Q(support_followup__note__icontains=search)
             )
         qs = qs.order_by(
             '-unread_support_count',
+            F('support_followup__needs_followup').desc(nulls_last=True),
             F('last_support_at').desc(nulls_last=True),
             '-orders_count',
             'email',
-        )[:50]
+        )[:60]
+
+        followup_count = ClientFollowUp.objects.filter(
+            needs_followup=True, client__role__in=CLIENT_ROLES
+        ).count()
 
         results = []
         for user in qs:
@@ -631,6 +665,11 @@ class AdminClientServiceView(APIView):
                 else None
             )
 
+            followup_obj = getattr(user, 'support_followup', None)
+            needs_followup = bool(getattr(followup_obj, 'needs_followup', False))
+            followup_note = (getattr(followup_obj, 'note', '') or '').strip()
+            last_reminded = getattr(followup_obj, 'last_reminded_at', None)
+
             results.append(
                 {
                     'id': user.id,
@@ -647,6 +686,11 @@ class AdminClientServiceView(APIView):
                     'support_messages_count': user.support_messages_count,
                     'unread_support_count': user.unread_support_count,
                     'last_support_message': last_msg_data,
+                    'needs_followup': needs_followup,
+                    'followup_note': followup_note,
+                    'last_reminded_at': (
+                        last_reminded.isoformat() if last_reminded is not None else None
+                    ),
                     'china_warehouse_address': build_china_warehouse_address(
                         user.full_name, user.phone_number, getattr(user, 'city', '') or ''
                     ),
@@ -661,7 +705,120 @@ class AdminClientServiceView(APIView):
                 }
             )
 
-        return Response({'count': len(results), 'results': results})
+        return Response(
+            {
+                'count': len(results),
+                'followup_count': followup_count,
+                'results': results,
+            }
+        )
+
+    def post(self, request, client_id=None):
+        raw_id = (
+            client_id
+            or request.data.get('client_id')
+            or request.data.get('client')
+            or request.query_params.get('client_id')
+            or request.query_params.get('client')
+        )
+        if not raw_id:
+            return Response({'detail': 'client_id requis.'}, status=400)
+        client = self._find_client_user(str(raw_id))
+        if client is None:
+            return Response({'detail': 'Client introuvable.'}, status=404)
+
+        action = (request.data.get('action') or '').strip().lower()
+        note = request.data.get('note')
+        raw_needs = request.data.get('needs_followup')
+
+        followup, created = ClientFollowUp.objects.get_or_create(
+            client=client,
+            defaults={
+                'needs_followup': True,
+                'note': (note or '').strip()[:500] if note is not None else '',
+                'updated_by': request.user,
+            },
+        )
+        if raw_needs is not None:
+            if isinstance(raw_needs, str):
+                followup.needs_followup = raw_needs.strip().lower() in (
+                    '1',
+                    'true',
+                    'yes',
+                    'on',
+                )
+            else:
+                followup.needs_followup = bool(raw_needs)
+        elif action == 'toggle' and not created:
+            followup.needs_followup = not followup.needs_followup
+        elif action in ('remove', 'clear', 'done'):
+            followup.needs_followup = False
+        elif action in ('add', 'remind', 'followup'):
+            followup.needs_followup = True
+
+        if note is not None:
+            followup.note = str(note).strip()[:500]
+        followup.updated_by = request.user
+
+        sent_notification = False
+        send_reminder = action == 'remind' or str(
+            request.data.get('send_reminder') or ''
+        ).strip().lower() in ('1', 'true', 'yes', 'on')
+
+        if send_reminder:
+            followup.last_reminded_at = timezone.now()
+            reminder_title = (
+                request.data.get('title') or 'Relance Service client Bujito'
+            ).strip()
+            default_body = (
+                followup.note
+                or 'Bonjour, notre équipe Service client vous relance concernant vos commandes / colis chez Bujito Digital. N’hésitez pas à nous répondre dans le chat.'
+            )
+            reminder_body = (request.data.get('message') or default_body).strip()
+
+            send_in_chat = str(request.data.get('send_in_chat', 'true')).strip().lower() not in (
+                '0',
+                'false',
+                'no',
+            )
+            if send_in_chat and reminder_body:
+                SupportMessage.objects.create(
+                    client=client,
+                    sender=request.user,
+                    body=reminder_body[:4000],
+                    is_read=False,
+                )
+
+            try:
+                from notifications.utils import send_fcm_notification
+
+                send_fcm_notification(
+                    client,
+                    reminder_title,
+                    reminder_body[:240],
+                    type='support',
+                    reference_id=str(client.pk),
+                    request=request,
+                    translate=False,
+                )
+                sent_notification = True
+            except Exception:
+                pass
+
+        followup.save()
+        return Response(
+            {
+                'client_id': client.pk,
+                'needs_followup': followup.needs_followup,
+                'followup_note': followup.note,
+                'last_reminded_at': (
+                    followup.last_reminded_at.isoformat()
+                    if followup.last_reminded_at
+                    else None
+                ),
+                'reminder_sent': sent_notification,
+            }
+        )
 
 
 class SupportChatView(APIView):
@@ -718,26 +875,40 @@ class SupportChatView(APIView):
 
     def _admin_threads_response(self, request):
         search = (request.query_params.get('search') or '').strip()
-        qs = User.objects.filter(role__in=CLIENT_ROLES).annotate(
-            messages_count=Count('support_threads', distinct=True),
-            unread_count=Count(
-                'support_threads',
-                filter=Q(
-                    support_threads__is_read=False,
-                    support_threads__sender_id=F('id'),
-                ),
-                distinct=True,
-            ),
-            last_message_at=Max('support_threads__created_at'),
+        followup_only = (request.query_params.get('followup') or '').strip().lower() in (
+            '1',
+            'true',
+            'yes',
+            'on',
         )
+        qs = (
+            User.objects.filter(role__in=CLIENT_ROLES)
+            .select_related('support_followup')
+            .annotate(
+                messages_count=Count('support_threads', distinct=True),
+                unread_count=Count(
+                    'support_threads',
+                    filter=Q(
+                        support_threads__is_read=False,
+                        support_threads__sender_id=F('id'),
+                    ),
+                    distinct=True,
+                ),
+                last_message_at=Max('support_threads__created_at'),
+            )
+        )
+        if followup_only:
+            qs = qs.filter(support_followup__needs_followup=True)
         if search:
             qs = qs.filter(
                 Q(email__icontains=search)
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
+                | Q(support_followup__note__icontains=search)
             )
         qs = qs.order_by(
             '-unread_count',
+            F('support_followup__needs_followup').desc(nulls_last=True),
             F('last_message_at').desc(nulls_last=True),
             'full_name',
             'email',
@@ -745,6 +916,9 @@ class SupportChatView(APIView):
 
         threads = []
         unread_total = 0
+        followup_total = ClientFollowUp.objects.filter(
+            needs_followup=True, client__role__in=CLIENT_ROLES
+        ).count()
         for u in qs:
             last_msg = (
                 SupportMessage.objects.filter(client=u)
@@ -752,6 +926,10 @@ class SupportChatView(APIView):
                 .order_by('-created_at')
                 .first()
             )
+            followup_obj = getattr(u, 'support_followup', None)
+            needs_followup = bool(getattr(followup_obj, 'needs_followup', False))
+            followup_note = (getattr(followup_obj, 'note', '') or '').strip()
+            last_reminded = getattr(followup_obj, 'last_reminded_at', None)
             unread_total += int(u.unread_count or 0)
             threads.append(
                 {
@@ -763,6 +941,11 @@ class SupportChatView(APIView):
                     'stars': getattr(u, 'stars', 0) or 0,
                     'messages_count': int(u.messages_count or 0),
                     'unread_count': int(u.unread_count or 0),
+                    'needs_followup': needs_followup,
+                    'followup_note': followup_note,
+                    'last_reminded_at': (
+                        last_reminded.isoformat() if last_reminded is not None else None
+                    ),
                     'last_message': (
                         SupportMessageSerializer(
                             last_msg, context={'request': request}
@@ -777,6 +960,7 @@ class SupportChatView(APIView):
                 'threads': threads,
                 'results': [],
                 'unread_total': unread_total,
+                'followup_total': followup_total,
             }
         )
 
@@ -807,6 +991,10 @@ class SupportChatView(APIView):
             .exclude(sender=request.user)
             .count()
         )
+        followup_obj = ClientFollowUp.objects.filter(client=client).first()
+        needs_followup = bool(getattr(followup_obj, 'needs_followup', False))
+        followup_note = (getattr(followup_obj, 'note', '') or '').strip()
+        last_reminded = getattr(followup_obj, 'last_reminded_at', None)
         return Response(
             {
                 'client_id': client.pk,
@@ -814,6 +1002,11 @@ class SupportChatView(APIView):
                 'client_email': client.email,
                 'client_phone': client.phone_number or '',
                 'unread_count': unread_count,
+                'needs_followup': needs_followup,
+                'followup_note': followup_note,
+                'last_reminded_at': (
+                    last_reminded.isoformat() if last_reminded is not None else None
+                ),
                 'results': SupportMessageSerializer(
                     qs, many=True, context={'request': request}
                 ).data,
@@ -827,7 +1020,11 @@ class SupportChatView(APIView):
         body = (request.data.get('body') or '').strip()
         attachment = None
         if hasattr(request, 'FILES'):
-            attachment = request.FILES.get('attachment') or request.FILES.get('image')
+            attachment = (
+                request.FILES.get('attachment')
+                or request.FILES.get('file')
+                or request.FILES.get('image')
+            )
         if len(body) < 1 and attachment is None:
             return Response({'detail': 'Message vide.'}, status=400)
 
@@ -852,7 +1049,14 @@ class SupportChatView(APIView):
         try:
             from notifications.utils import notify_admins, send_fcm_notification
 
-            preview = body[:120] if body else 'Photo jointe dans le chat support.'
+            if body:
+                preview = body[:120]
+            elif attachment is not None:
+                import os
+                fname = os.path.basename(str(getattr(attachment, 'name', '') or 'fichier'))
+                preview = f'Pièce jointe dans le chat : {fname}'
+            else:
+                preview = 'Nouveau message dans le chat support.'
             if is_app_admin(request.user):
                 send_fcm_notification(
                     client,
@@ -860,6 +1064,11 @@ class SupportChatView(APIView):
                     preview,
                     type='support',
                     reference_id=str(client.pk),
+                    data={
+                        'type': 'support',
+                        'client_id': str(client.pk),
+                        'message_id': str(msg.pk),
+                    },
                     request=request,
                     translate=False,
                 )
@@ -871,8 +1080,10 @@ class SupportChatView(APIView):
                     type='support',
                     reference_id=str(client.pk),
                     data={
+                        'type': 'support',
                         'client_id': str(client.pk),
                         'client_label': client_label,
+                        'message_id': str(msg.pk),
                     },
                 )
         except Exception:

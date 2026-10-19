@@ -79,7 +79,7 @@ class SupportMessage(PublicUUIDModel):
         verbose_name=_('Expéditeur'),
     )
     body = models.TextField(blank=True, default='', verbose_name=_('Message'))
-    attachment = models.ImageField(
+    attachment = models.FileField(
         upload_to='support_chat/%Y/%m/',
         blank=True,
         null=True,
@@ -95,3 +95,48 @@ class SupportMessage(PublicUUIDModel):
 
     def __str__(self):
         return f'{self.sender_id} → {self.client_id}: {self.body[:40]}'
+
+
+class ClientFollowUp(PublicUUIDModel):
+    """Suivi client : liste à rappeler / à relancer (Service client)."""
+
+    client = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='support_followup',
+        verbose_name=_('Client'),
+    )
+    needs_followup = models.BooleanField(
+        default=True,
+        db_index=True,
+        verbose_name=_('À rappeler / relancer'),
+    )
+    note = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        verbose_name=_('Note de relance'),
+    )
+    last_reminded_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_('Dernière relance'),
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='client_followups_updated',
+        verbose_name=_('Mis à jour par'),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        verbose_name = _('Client à relancer')
+        verbose_name_plural = _('Clients à relancer')
+
+    def __str__(self):
+        return f'FollowUp(client={self.client_id}, active={self.needs_followup})'

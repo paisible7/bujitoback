@@ -183,6 +183,15 @@ class AdminReportsApiTests(TestCase):
                 self.assertEqual(
                     created_expense.status_code, 201, created_expense.data
                 )
+                created_payload = created_expense.json()
+                self.assertEqual(
+                    created_payload.get('client_names'),
+                    ['Client Reports'],
+                )
+                details = created_payload.get('clients_detail') or []
+                self.assertEqual(len(details), 1)
+                self.assertEqual(details[0]['id'], self.client_user.pk)
+                self.assertEqual(details[0]['full_name'], 'Client Reports')
 
                 response = self.client.get('/api/admin/accounting/')
                 self.assertEqual(response.status_code, 200)
@@ -241,8 +250,17 @@ class AdminReportsApiTests(TestCase):
                     {'client': 'Client Reports'},
                 )
                 self.assertEqual(expense_rows.status_code, 200)
-                names = {row['name'] for row in expense_rows.json()}
+                expense_list = expense_rows.json()
+                names = {row['name'] for row in expense_list}
                 self.assertEqual(names, {'Transporteur', 'Colis perdu'})
+                transporteur = next(
+                    row for row in expense_list if row['name'] == 'Transporteur'
+                )
+                self.assertIn(self.client_user.pk, transporteur.get('client_ids', []))
+                self.assertEqual(
+                    transporteur.get('clients_detail')[0]['full_name'],
+                    'Client Reports',
+                )
 
     def test_accounting_pagination_bounds(self):
         self.client.force_authenticate(self.admin)
@@ -360,3 +378,65 @@ class AdminReportsApiTests(TestCase):
                         '.jpg'
                     )
                 )
+                self.assertTrue(with_photo.json().get('attachment_is_image'))
+
+                # L'admin joint un fichier document (PDF) dans le chat
+                self.client.force_authenticate(self.admin)
+                pdf_file = SimpleUploadedFile(
+                    'devis_bujito.pdf',
+                    b'%PDF-1.4 fake pdf content',
+                    content_type='application/pdf',
+                )
+                with_pdf = self.client.post(
+                    f'/api/support-chat/{self.client_user.pk}/',
+                    {'body': 'Voici le devis en PDF', 'attachment': pdf_file},
+                    format='multipart',
+                )
+                self.assertEqual(with_pdf.status_code, 201, with_pdf.data)
+                self.assertEqual(
+                    with_pdf.json().get('attachment_name'),
+                    'devis_bujito.pdf',
+                )
+                self.assertFalse(with_pdf.json().get('attachment_is_image'))
+
+        # Liste à rappeler / à relancer (followup)
+        self.client.force_authenticate(self.admin)
+        followup_res = self.client.post(
+            '/api/admin/client-service/',
+            {
+                'client_id': self.client_user.pk,
+                'action': 'remind',
+                'note': 'Relancer pour confirmation groupage',
+                'send_reminder': True,
+            },
+            format='json',
+        )
+        self.assertEqual(followup_res.status_code, 200, followup_res.data)
+        self.assertTrue(followup_res.json()['needs_followup'])
+        self.assertEqual(
+            followup_res.json()['followup_note'],
+            'Relancer pour confirmation groupage',
+        )
+        self.assertIsNotNone(followup_res.json()['last_reminded_at'])
+
+        # Filtrage par followup=true dans client-service et support-chat
+        cs_followup = self.client.get(
+            '/api/admin/client-service/', {'followup': 'true'}
+        )
+        self.assertEqual(cs_followup.status_code, 200)
+        self.assertGreaterEqual(cs_followup.json()['followup_count'], 1)
+        self.assertTrue(
+            any(
+                r['id'] == self.client_user.pk and r['needs_followup']
+                for r in cs_followup.json()['results']
+            )
+        )
+
+        # Retirer de la liste à relancer
+        cleared = self.client.post(
+            f'/api/admin/client-service/{self.client_user.pk}/followup/',
+            {'action': 'remove'},
+            format='json',
+        )
+        self.assertEqual(cleared.status_code, 200)
+        self.assertFalse(cleared.json()['needs_followup'])

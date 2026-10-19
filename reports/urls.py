@@ -33,6 +33,11 @@ urlpatterns = [
         AdminClientServiceView.as_view(),
         name='admin-client-service',
     ),
+    path(
+        'client-service/<str:client_id>/followup/',
+        AdminClientServiceView.as_view(),
+        name='admin-client-service-followup',
+    ),
     path('support-chat/', SupportChatView.as_view(), name='support-chat'),
     path(
         'support-chat/<str:client_id>/',

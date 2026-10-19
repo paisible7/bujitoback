@@ -45,6 +45,7 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     )
     client_ids = serializers.SerializerMethodField()
     client_names = serializers.SerializerMethodField()
+    clients_detail = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
     client_email = serializers.SerializerMethodField()
     recorded_by = serializers.PrimaryKeyRelatedField(read_only=True)
@@ -56,12 +57,13 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
         fields = (
             'id', 'name', 'category', 'entry_type', 'description', 'amount',
             'currency', 'expense_date', 'clients', 'client_ids', 'client_names',
-            'client_name', 'client_email',
+            'clients_detail', 'client_name', 'client_email',
             'recorded_by', 'proof_image', 'proof_image_url',
             'created_at', 'updated_at',
         )
         read_only_fields = (
-            'id', 'client_ids', 'client_names', 'client_name', 'client_email',
+            'id', 'client_ids', 'client_names', 'clients_detail',
+            'client_name', 'client_email',
             'recorded_by', 'proof_image_url', 'created_at', 'updated_at',
         )
 
@@ -76,12 +78,24 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
         return list(obj.clients.values_list('pk', flat=True))
 
     def get_client_names(self, obj):
-        names = []
+        return [
+            (row.get('full_name') or row.get('email') or '').strip()
+            for row in self.get_clients_detail(obj)
+            if (row.get('full_name') or row.get('email'))
+        ]
+
+    def get_clients_detail(self, obj):
+        rows = []
         for user in obj.clients.all():
-            label = (getattr(user, 'full_name', '') or '').strip() or user.email
-            if label:
-                names.append(label)
-        return names
+            full_name = (getattr(user, 'full_name', '') or '').strip()
+            rows.append({
+                'id': user.pk,
+                'full_name': full_name,
+                'email': user.email or '',
+                'phone_number': getattr(user, 'phone_number', '') or '',
+                'city': getattr(user, 'city', '') or '',
+            })
+        return rows
 
     def get_client_name(self, obj):
         names = self.get_client_names(obj)
@@ -157,18 +171,22 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
     client_email = serializers.SerializerMethodField()
     is_from_admin = serializers.SerializerMethodField()
     attachment_url = serializers.SerializerMethodField()
+    attachment_name = serializers.SerializerMethodField()
+    attachment_is_image = serializers.SerializerMethodField()
 
     class Meta:
         model = SupportMessage
         fields = (
             'id', 'client', 'client_name', 'client_email',
             'sender', 'sender_name', 'is_from_admin',
-            'body', 'attachment_url', 'is_read', 'created_at',
+            'body', 'attachment_url', 'attachment_name', 'attachment_is_image',
+            'is_read', 'created_at',
         )
         read_only_fields = (
             'id', 'client', 'client_name', 'client_email',
             'sender', 'sender_name', 'is_from_admin',
-            'attachment_url', 'is_read', 'created_at',
+            'attachment_url', 'attachment_name', 'attachment_is_image',
+            'is_read', 'created_at',
         )
 
     def get_sender_name(self, obj):
@@ -190,3 +208,14 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
             self.context.get('request'),
             label=f'SupportMessage #{obj.pk} attachment',
         )
+
+    def get_attachment_name(self, obj):
+        if not obj.attachment or not getattr(obj.attachment, 'name', None):
+            return None
+        import os
+        return os.path.basename(str(obj.attachment.name))
+
+    def get_attachment_is_image(self, obj):
+        name = self.get_attachment_name(obj) or ''
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        return ext in {'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'}
