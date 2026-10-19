@@ -182,6 +182,55 @@ class ProfilePhotoAndAgentAccessTests(TestCase):
             ['accounting', 'stats'],
         )
 
+    def test_superuser_can_patch_worker_percentages_and_status(self):
+        self.client.force_authenticate(self.superuser)
+        response = self.client.patch(
+            f'/api/auth/users/{self.agent.id}/',
+            {
+                'service_percentages': {'orders': 5, 'client_service': 6, 'bad': 9},
+                'worker_status': 'pending',
+                'permissions_restricted': True,
+                'admin_permissions': ['client_service'],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.agent.refresh_from_db()
+        self.assertEqual(self.agent.service_percentages, {'orders': 5.0, 'client_service': 6.0})
+        self.assertEqual(self.agent.worker_status, 'pending')
+        self.assertFalse(self.agent.is_active)
+        self.assertTrue(self.agent.permissions_restricted)
+        self.assertEqual(response.data['service_percentages']['orders'], 5.0)
+        self.assertIsNone(response.data.get('last_salary_payment'))
+
+    def test_superuser_records_salary_and_worker_sees_it(self):
+        self.client.force_authenticate(self.superuser)
+        response = self.client.post(
+            f'/api/auth/users/{self.agent.id}/salary/',
+            {
+                'amount': '120.50',
+                'currency': 'USD',
+                'service': 'orders',
+                'note': 'Octobre',
+                'proof_image': self._make_image(),
+            },
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(str(response.data['amount']), '120.50')
+        self.assertTrue(response.data.get('proof_url'))
+
+        self.client.force_authenticate(self.agent)
+        profile = self.client.get('/api/auth/profile/')
+        self.assertEqual(profile.status_code, 200)
+        last = profile.data.get('last_salary_payment')
+        self.assertIsNotNone(last)
+        self.assertEqual(str(last['amount']), '120.50')
+        self.assertTrue(last.get('proof_url'))
+        mine = self.client.get('/api/auth/profile/salary/')
+        self.assertEqual(mine.status_code, 200)
+        self.assertEqual(len(mine.data), 1)
+
     def test_admin_cannot_patch_agent_permissions(self):
         other = User.objects.create_user(
             email='other-admin@bujito.com',

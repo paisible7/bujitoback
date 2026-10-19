@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.translation import gettext_lazy as _
 
-from .models import CustomUser
+from .models import AgentSalaryPayment, CustomUser
 from .roles import apply_role_flags, normalize_role
 
 
@@ -30,6 +30,9 @@ class CustomUserAdmin(BaseUserAdmin):
             'fields': (
                 'role',
                 'admin_permissions',
+                'service_percentages',
+                'worker_status',
+                'permissions_restricted',
                 'is_active',
                 'is_staff',
                 'is_superuser',
@@ -80,3 +83,18 @@ class CustomUserAdmin(BaseUserAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return self.has_module_permission(request)
+
+
+@admin.register(AgentSalaryPayment)
+class AgentSalaryPaymentAdmin(admin.ModelAdmin):
+    list_display = (
+        'worker',
+        'amount',
+        'currency',
+        'service',
+        'status',
+        'paid_at',
+    )
+    list_filter = ('status', 'currency', 'service')
+    search_fields = ('worker__email', 'worker__full_name', 'note')
+    readonly_fields = ('uuid', 'created_at')

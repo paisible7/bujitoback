@@ -4,6 +4,7 @@ from .views import (
     UserProfileView,
     UserListCreateView,
     UserAdminDetailView,
+    AgentSalaryView,
     PasswordResetVerifyView,
     PasswordResetView,
 )
@@ -11,7 +12,17 @@ from .views import (
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='auth_register'),
     path('profile/', UserProfileView.as_view(), name='auth_profile'),
+    path(
+        'profile/salary/',
+        AgentSalaryView.as_view(),
+        name='auth_profile_salary',
+    ),
     path('users/', UserListCreateView.as_view(), name='auth_users_list'),
+    path(
+        'users/<str:pk>/salary/',
+        AgentSalaryView.as_view(),
+        name='auth_users_salary',
+    ),
     path(
         'users/<str:pk>/',
         UserAdminDetailView.as_view(),

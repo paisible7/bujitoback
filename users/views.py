@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from django.db.models import Q, Count
+from django.db.models import Q, Count, Prefetch
 from django.contrib.auth import get_user_model
 
 from .roles import (
@@ -22,6 +22,7 @@ from .serializers import (
     AdminCreateUserSerializer,
     AdminUserUpdateSerializer,
     AdminAgentUpdateSerializer,
+    AgentSalaryPaymentSerializer,
     ProfileUpdateSerializer,
     CustomTokenObtainPairSerializer,
     PasswordResetVerifySerializer,
@@ -31,9 +32,21 @@ from .serializers import (
     build_china_sea_address,
 )
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from core.serializers import UUIDLookupMixin
+from core.serializers import UUIDLookupMixin, resolve_uuid_or_pk
 from .admin_permissions import normalize_admin_permissions
+from .models import (
+    AgentSalaryPayment,
+    WORKER_SERVICE_KEYS,
+)
 from parcels.pagination import OptionalPageNumberPagination
+
+AGENT_PATCH_KEYS = (
+    'admin_permissions',
+    'is_active',
+    'service_percentages',
+    'worker_status',
+    'permissions_restricted',
+)
 
 User = get_user_model()
 
@@ -214,6 +227,11 @@ class UserListCreateView(generics.ListCreateAPIView):
                 filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
                 distinct=True,
             ),
+        ).prefetch_related(
+            Prefetch(
+                'salary_payments',
+                queryset=AgentSalaryPayment.objects.order_by('-paid_at', '-created_at'),
+            ),
         )
 
     def create(self, request, *args, **kwargs):
@@ -258,6 +276,11 @@ class UserAdminDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
                 filter=Q(orders__parcels__status__in=PARCEL_SENT_STATUSES),
                 distinct=True,
             ),
+        ).prefetch_related(
+            Prefetch(
+                'salary_payments',
+                queryset=AgentSalaryPayment.objects.order_by('-paid_at', '-created_at'),
+            ),
         )
 
     def get_serializer_class(self):
@@ -276,10 +299,7 @@ class UserAdminDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
         if (
             is_platform_superuser(request.user)
             and normalize_role(instance.role) == ROLE_ADMIN
-            and (
-                'admin_permissions' in request.data
-                or 'is_active' in request.data
-            )
+            and any(key in request.data for key in AGENT_PATCH_KEYS)
         ):
             serializer = AdminAgentUpdateSerializer(
                 instance, data=request.data, partial=True
@@ -299,6 +319,94 @@ class UserAdminDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
         instance.refresh_from_db()
         return Response(
             UserSerializer(instance, context={'request': request}).data
+        )
+
+
+class AgentSalaryView(APIView):
+    """Salaire travailleur : liste (soi / Super Admin) + enregistrement (Super Admin)."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, FormParser, MultiPartParser]
+
+    def _worker(self, pk):
+        qs = User.objects.filter(role=ROLE_ADMIN)
+        try:
+            return resolve_uuid_or_pk(qs, pk)
+        except User.DoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Travailleur introuvable.')
+
+    def get(self, request, pk=None):
+        if pk is None:
+            worker = request.user
+        else:
+            if not is_platform_superuser(request.user):
+                return Response(
+                    {'detail': 'Réservé au Super Admin.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            worker = self._worker(pk)
+        payments = AgentSalaryPayment.objects.filter(worker=worker)
+        return Response(
+            AgentSalaryPaymentSerializer(
+                payments, many=True, context={'request': request}
+            ).data
+        )
+
+    def post(self, request, pk=None):
+        if not is_platform_superuser(request.user):
+            return Response(
+                {'detail': 'Réservé au Super Admin.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if pk is None:
+            return Response(
+                {'detail': 'Travailleur requis.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        worker = self._worker(pk)
+        try:
+            amount = float(request.data.get('amount'))
+        except (TypeError, ValueError):
+            return Response(
+                {'amount': ['Montant invalide.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if amount <= 0:
+            return Response(
+                {'amount': ['Le montant doit être positif.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        currency = (request.data.get('currency') or 'USD').strip()[:10] or 'USD'
+        service = (request.data.get('service') or '').strip().lower()
+        if service and service not in WORKER_SERVICE_KEYS:
+            return Response(
+                {'service': ['Service inconnu.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        note = (request.data.get('note') or '').strip()[:400]
+        status_value = (request.data.get('status') or AgentSalaryPayment.STATUS_PAID).strip()
+        if status_value not in {
+            AgentSalaryPayment.STATUS_PAID,
+            AgentSalaryPayment.STATUS_PENDING,
+        }:
+            status_value = AgentSalaryPayment.STATUS_PAID
+        proof = request.FILES.get('proof_image')
+        payment = AgentSalaryPayment.objects.create(
+            worker=worker,
+            amount=amount,
+            currency=currency,
+            service=service,
+            note=note,
+            status=status_value,
+            proof_image=proof,
+            recorded_by=request.user,
+        )
+        return Response(
+            AgentSalaryPaymentSerializer(
+                payment, context={'request': request}
+            ).data,
+            status=status.HTTP_201_CREATED,
         )
 
 

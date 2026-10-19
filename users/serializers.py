@@ -12,6 +12,12 @@ from .roles import (
 from .admin_permissions import (
     normalize_admin_permissions,
 )
+from .models import (
+    AgentSalaryPayment,
+    apply_worker_status,
+    normalize_service_percentages,
+    normalize_worker_status,
+)
 
 User = get_user_model()
 
@@ -94,6 +100,8 @@ class UserSerializer(serializers.ModelSerializer):
         read_only=True, required=False, default=0
     )
     admin_permissions = serializers.SerializerMethodField()
+    service_percentages = serializers.SerializerMethodField()
+    last_salary_payment = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -105,6 +113,10 @@ class UserSerializer(serializers.ModelSerializer):
             'orders_count', 'parcels_count',
             'parcels_received_count', 'parcels_sent_count',
             'admin_permissions',
+            'service_percentages',
+            'worker_status',
+            'permissions_restricted',
+            'last_salary_payment',
         )
         read_only_fields = (
             'id', 'email', 'role', 'full_name', 'phone_number', 'city',
@@ -114,6 +126,10 @@ class UserSerializer(serializers.ModelSerializer):
             'orders_count', 'parcels_count',
             'parcels_received_count', 'parcels_sent_count',
             'admin_permissions',
+            'service_percentages',
+            'worker_status',
+            'permissions_restricted',
+            'last_salary_payment',
         )
 
     def get_china_warehouse_address(self, obj):
@@ -151,6 +167,21 @@ class UserSerializer(serializers.ModelSerializer):
         return normalize_admin_permissions(
             getattr(obj, 'admin_permissions', None)
         )
+
+    def get_service_percentages(self, obj):
+        return normalize_service_percentages(
+            getattr(obj, 'service_percentages', None)
+        )
+
+    def get_last_salary_payment(self, obj):
+        cached = getattr(obj, '_prefetched_objects_cache', {}).get('salary_payments')
+        if cached is not None:
+            latest = cached[0] if cached else None
+        else:
+            latest = obj.salary_payments.first() if hasattr(obj, 'salary_payments') else None
+        if latest is None:
+            return None
+        return AgentSalaryPaymentSerializer(latest, context=self.context).data
 
     def to_representation(self, instance):
         from parcels.models import Parcel
@@ -197,16 +228,25 @@ class AdminUserUpdateSerializer(serializers.ModelSerializer):
 
 
 class AdminAgentUpdateSerializer(serializers.Serializer):
-    """Super Admin : permissions / activation d'un agent admin."""
+    """Super Admin : permissions / activation / % d'un travailleur admin."""
 
     admin_permissions = serializers.ListField(
         child=serializers.CharField(),
         required=False,
     )
     is_active = serializers.BooleanField(required=False)
+    service_percentages = serializers.JSONField(required=False)
+    worker_status = serializers.CharField(required=False, allow_blank=True)
+    permissions_restricted = serializers.BooleanField(required=False)
 
     def validate_admin_permissions(self, value):
         return normalize_admin_permissions(value)
+
+    def validate_service_percentages(self, value):
+        return normalize_service_percentages(value)
+
+    def validate_worker_status(self, value):
+        return normalize_worker_status(value)
 
     def validate(self, attrs):
         instance = self.instance
@@ -228,10 +268,49 @@ class AdminAgentUpdateSerializer(serializers.Serializer):
     def update(self, instance, validated_data):
         if 'admin_permissions' in validated_data:
             instance.admin_permissions = validated_data['admin_permissions']
-        if 'is_active' in validated_data:
+        if 'service_percentages' in validated_data:
+            instance.service_percentages = validated_data['service_percentages']
+        if 'permissions_restricted' in validated_data:
+            instance.permissions_restricted = validated_data['permissions_restricted']
+        if 'worker_status' in validated_data:
+            apply_worker_status(instance, validated_data['worker_status'])
+        elif 'is_active' in validated_data:
             instance.is_active = validated_data['is_active']
+            if instance.is_active:
+                instance.worker_status = User.WORKER_STATUS_ACTIVE
+            elif instance.worker_status == User.WORKER_STATUS_ACTIVE:
+                instance.worker_status = User.WORKER_STATUS_PENDING
         instance.save()
         return instance
+
+
+class AgentSalaryPaymentSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source='uuid', read_only=True)
+    proof_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AgentSalaryPayment
+        fields = (
+            'id',
+            'amount',
+            'currency',
+            'service',
+            'paid_at',
+            'note',
+            'status',
+            'proof_url',
+            'created_at',
+        )
+        read_only_fields = fields
+
+    def get_proof_url(self, obj):
+        from parcels.media_urls import absolute_media_url
+
+        return absolute_media_url(
+            getattr(obj, 'proof_image', None),
+            self.context.get('request'),
+            label='salary_proof',
+        )
 
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
@@ -336,6 +415,13 @@ class AdminCreateUserSerializer(serializers.Serializer):
         choices=[ROLE_CLIENT, ROLE_ADMIN],
         default=ROLE_CLIENT,
     )
+    admin_permissions = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+    )
+    service_percentages = serializers.JSONField(required=False)
+    worker_status = serializers.CharField(required=False, allow_blank=True)
+    permissions_restricted = serializers.BooleanField(required=False)
 
     def validate_email(self, value):
         email = value.strip().lower()
@@ -392,11 +478,24 @@ class AdminCreateUserSerializer(serializers.Serializer):
             raise serializers.ValidationError('Rôle non autorisé.')
         return role
 
+    def validate_admin_permissions(self, value):
+        return normalize_admin_permissions(value)
+
+    def validate_service_percentages(self, value):
+        return normalize_service_percentages(value)
+
+    def validate_worker_status(self, value):
+        return normalize_worker_status(value, default=User.WORKER_STATUS_PENDING)
+
     def create(self, validated_data):
         phone = validated_data.get('phone_number') or None
         if phone is not None and str(phone).strip() == '':
             phone = None
-        return User.objects.create_user(
+        percentages = validated_data.pop('service_percentages', None)
+        perms = validated_data.pop('admin_permissions', None)
+        worker_status = validated_data.pop('worker_status', None)
+        restricted = validated_data.pop('permissions_restricted', None)
+        user = User.objects.create_user(
             email=validated_data['email'],
             password=validated_data['password'],
             role=validated_data.get('role', ROLE_CLIENT),
@@ -404,6 +503,26 @@ class AdminCreateUserSerializer(serializers.Serializer):
             phone_number=phone,
             city=validated_data.get('city', ''),
         )
+        if normalize_role(user.role) == ROLE_ADMIN:
+            changed = False
+            if percentages is not None:
+                user.service_percentages = percentages
+                changed = True
+            if perms is not None:
+                user.admin_permissions = perms
+                changed = True
+            if worker_status:
+                apply_worker_status(user, worker_status)
+                changed = True
+            if restricted is not None:
+                user.permissions_restricted = restricted
+                changed = True
+            elif percentages is not None or perms is not None:
+                user.permissions_restricted = True
+                changed = True
+            if changed:
+                user.save()
+        return user
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -452,6 +571,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'stars': getattr(user, 'stars', 0) or 0,
             'admin_permissions': normalize_admin_permissions(
                 getattr(user, 'admin_permissions', None)
+            ),
+            'service_percentages': normalize_service_percentages(
+                getattr(user, 'service_percentages', None)
+            ),
+            'worker_status': getattr(
+                user, 'worker_status', User.WORKER_STATUS_ACTIVE
+            ) or User.WORKER_STATUS_ACTIVE,
+            'permissions_restricted': bool(
+                getattr(user, 'permissions_restricted', False)
             ),
             'china_warehouse_address': build_china_warehouse_address(
                 user.full_name,

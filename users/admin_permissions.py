@@ -104,6 +104,8 @@ def has_admin_permission(user, key: str) -> bool:
         return True
     perms = get_user_admin_permissions(user)
     if not perms:
+        if getattr(user, 'permissions_restricted', False):
+            return False
         return True
     return perm in perms
 
@@ -114,6 +116,8 @@ def admin_has_full_access(user) -> bool:
     if is_platform_superuser(user):
         return True
     if not is_app_admin(user):
+        return False
+    if getattr(user, 'permissions_restricted', False):
         return False
     return not get_user_admin_permissions(user)
 

@@ -63,8 +63,13 @@ class UUIDLookupMixin:
     lookup_url_kwarg = 'pk'
 
     def get_object(self):
+        from django.http import Http404
+
         queryset = self.filter_queryset(self.get_queryset())
         lookup = self.kwargs.get(self.lookup_url_kwarg) or self.kwargs.get('pk')
-        obj = resolve_uuid_or_pk(queryset, lookup)
+        try:
+            obj = resolve_uuid_or_pk(queryset, lookup)
+        except queryset.model.DoesNotExist as exc:
+            raise Http404 from exc
         self.check_object_permissions(self.request, obj)
         return obj
