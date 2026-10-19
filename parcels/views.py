@@ -1703,6 +1703,8 @@ def _expedition_quote_or_create(request, *, create: bool):
             volume_cbm_override=volume_override,
             weight_kg_override=weight_override,
             client_stars=client_stars,
+            destination_city=request.data.get('destination_city')
+            or request.data.get('city'),
         )
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

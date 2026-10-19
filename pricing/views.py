@@ -86,7 +86,11 @@ class PricingEstimateView(APIView):
                     {"message": "volume_cbm is required"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            result = cbm_cost(volume_cbm=volume, settings=cfg)
+            result = cbm_cost(
+                volume_cbm=volume,
+                settings=cfg,
+                city=data.get("city"),
+            )
         else:
             category = data.get("category") or "ordinary"
             if category not in {"phone", "computer"} and weight is None:
@@ -99,6 +103,7 @@ class PricingEstimateView(APIView):
                 weight_kg=weight,
                 quantity=data.get("quantity", 1),
                 settings=cfg,
+                city=data.get("city"),
             )
 
         return Response(result)

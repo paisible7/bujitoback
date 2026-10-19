@@ -4,6 +4,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_CEILING, InvalidOperation
 from typing import Any
 
+from .cities import normalize_pricing_city, resolve_city_rates
 from .models import BusinessSettings
 
 HALF = Decimal("0.5")
@@ -37,41 +38,44 @@ def shipping_cost(
     weight_kg=None,
     quantity: int = 1,
     settings: BusinessSettings | None = None,
+    city=None,
 ) -> dict[str, Any]:
     """
     category: ordinary | express | sensitive | phone | computer
+    city: Kinshasa (défaut) ou Lubumbashi
     """
     cfg = settings or BusinessSettings.load()
+    rates = resolve_city_rates(cfg, city)
     cat = (category or "ordinary").strip().lower()
     billable = billable_weight_kg(weight_kg)
     pieces = max(1, int(quantity or 1))
 
     if cat == "phone":
-        amount = cfg.phone_flat_fee
-        days = cfg.phone_days
+        amount = rates["phone_flat_fee"]
+        days = rates["phone_days"]
         available = True
         detail = "forfait téléphone"
     elif cat == "computer":
-        amount = (cfg.computer_flat_fee * pieces).quantize(Decimal("0.01"))
+        amount = (rates["computer_flat_fee"] * pieces).quantize(Decimal("0.01"))
         days = None
         available = True
-        detail = f"{pieces} × forfait ordinateur à {cfg.computer_flat_fee} $/pièce"
+        detail = f"{pieces} × forfait ordinateur à {rates['computer_flat_fee']} $/pièce"
     elif cat == "express":
         available = bool(cfg.express_available)
-        days = cfg.express_days
-        amount = (billable * cfg.express_rate_per_kg).quantize(Decimal("0.01")) if available else ZERO
-        detail = f"{billable} kg × {cfg.express_rate_per_kg} $/kg"
+        days = rates["express_days"]
+        amount = (billable * rates["express_rate_per_kg"]).quantize(Decimal("0.01")) if available else ZERO
+        detail = f"{billable} kg × {rates['express_rate_per_kg']} $/kg"
     elif cat == "sensitive":
         available = True
-        days = cfg.sensitive_days
-        amount = (billable * cfg.sensitive_rate_per_kg).quantize(Decimal("0.01"))
-        detail = f"{billable} kg × {cfg.sensitive_rate_per_kg} $/kg"
+        days = rates["sensitive_days"]
+        amount = (billable * rates["sensitive_rate_per_kg"]).quantize(Decimal("0.01"))
+        detail = f"{billable} kg × {rates['sensitive_rate_per_kg']} $/kg"
     else:
         cat = "ordinary"
         available = True
-        days = cfg.ordinary_days
-        amount = (billable * cfg.ordinary_rate_per_kg).quantize(Decimal("0.01"))
-        detail = f"{billable} kg × {cfg.ordinary_rate_per_kg} $/kg"
+        days = rates["ordinary_days"]
+        amount = (billable * rates["ordinary_rate_per_kg"]).quantize(Decimal("0.01"))
+        detail = f"{billable} kg × {rates['ordinary_rate_per_kg']} $/kg"
 
     return {
         "category": cat,
@@ -81,6 +85,7 @@ def shipping_cost(
         "days": days,
         "amount_usd": float(amount),
         "detail": detail,
+        "city": normalize_pricing_city(city),
         "message": None if available else "Express bientôt disponible",
     }
 

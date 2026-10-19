@@ -2,12 +2,14 @@ from rest_framework import serializers
 
 from parcels.media_urls import absolute_media_url
 
+from .cities import apply_shipping_by_city, serialize_shipping_by_city
 from .models import BusinessSettings
 
 
 class BusinessSettingsSerializer(serializers.ModelSerializer):
     alipay_qr_url = serializers.SerializerMethodField()
     wechat_qr_url = serializers.SerializerMethodField()
+    shipping_by_city = serializers.SerializerMethodField()
 
     class Meta:
         model = BusinessSettings
@@ -39,9 +41,26 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "china_sea_address",
             "alipay_qr_url",
             "wechat_qr_url",
+            "shipping_by_city",
             "updated_at",
         ]
-        read_only_fields = ["updated_at", "alipay_qr_url", "wechat_qr_url"]
+        read_only_fields = [
+            "updated_at",
+            "alipay_qr_url",
+            "wechat_qr_url",
+            "shipping_by_city",
+        ]
+
+    def get_shipping_by_city(self, obj):
+        return serialize_shipping_by_city(obj)
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        raw = getattr(self, "initial_data", None)
+        if isinstance(raw, dict) and "shipping_by_city" in raw:
+            apply_shipping_by_city(instance, raw.get("shipping_by_city"))
+            instance.save()
+        return instance
 
     def get_alipay_qr_url(self, obj):
         return absolute_media_url(
@@ -80,3 +99,4 @@ class EstimateSerializer(serializers.Serializer):
         allow_null=True,
         min_value=0,
     )
+    city = serializers.CharField(required=False, allow_blank=True, default='')

@@ -167,6 +167,13 @@ class BusinessSettings(PublicUUIDModel):
         default=Decimal("500.00"),
         verbose_name=_("Par bateau (CBM) — $/m³"),
     )
+    # Overlay Lubumbashi (Kinshasa = colonnes ci-dessus).
+    city_shipping_rates = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name=_("Tarifs par ville"),
+        help_text=_('Ex: {"lubumbashi": {"ordinary_rate_per_kg": 19}}'),
+    )
 
     # --- QR paiements Chine (transferts agents / Alipay / fournisseurs) ---
     alipay_qr_image = models.ImageField(

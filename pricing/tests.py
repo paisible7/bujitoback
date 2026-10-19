@@ -143,3 +143,59 @@ class PricingApiTests(APITestCase):
         self.assertEqual(read.status_code, 200)
         self.assertEqual(read.data["china_air_address"], "Air WH Guangzhou")
         self.assertEqual(read.data["china_sea_address"], "Sea Port Ningbo")
+
+    def test_settings_expose_kinshasa_and_lubumbashi_rates(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/pricing/settings/")
+        self.assertEqual(response.status_code, 200)
+        cities = response.data["shipping_by_city"]
+        self.assertEqual(float(cities["kinshasa"]["ordinary_rate_per_kg"]), 17.0)
+        self.assertEqual(float(cities["lubumbashi"]["ordinary_rate_per_kg"]), 17.0)
+
+    def test_admin_can_set_lubumbashi_rate_independently(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.patch(
+            "/api/pricing/settings/",
+            {
+                "shipping_by_city": {
+                    "lubumbashi": {"ordinary_rate_per_kg": "22.00"},
+                }
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        cities = response.data["shipping_by_city"]
+        self.assertEqual(float(cities["kinshasa"]["ordinary_rate_per_kg"]), 17.0)
+        self.assertEqual(float(cities["lubumbashi"]["ordinary_rate_per_kg"]), 22.0)
+        self.assertEqual(float(response.data["ordinary_rate_per_kg"]), 17.0)
+
+    def test_estimate_uses_lubumbashi_rate(self):
+        cfg = BusinessSettings.load()
+        cfg.city_shipping_rates = {
+            "lubumbashi": {"ordinary_rate_per_kg": 20, "ordinary_days": 21},
+        }
+        cfg.save()
+        kin = shipping_cost(category="ordinary", weight_kg="1", settings=cfg, city="Kinshasa")
+        lub = shipping_cost(
+            category="ordinary",
+            weight_kg="1",
+            settings=cfg,
+            city="Lubumbashi",
+        )
+        self.assertEqual(kin["amount_usd"], 17.0)
+        self.assertEqual(lub["amount_usd"], 20.0)
+        self.assertEqual(lub["city"], "lubumbashi")
+
+        self.client.force_authenticate(self.user)
+        response = self.client.post(
+            "/api/pricing/estimate/",
+            {
+                "kind": "shipping",
+                "category": "ordinary",
+                "weight_kg": "1",
+                "city": "Lubumbashi",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["amount_usd"], 20.0)

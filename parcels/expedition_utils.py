@@ -66,8 +66,16 @@ def parcel_grouping_fee(parcel) -> Decimal | None:
     return ZERO
 
 
-def cbm_cost(*, volume_cbm, settings: BusinessSettings | None = None) -> dict[str, Any]:
+def cbm_cost(
+    *,
+    volume_cbm,
+    settings: BusinessSettings | None = None,
+    city=None,
+) -> dict[str, Any]:
+    from pricing.cities import resolve_city_rates
+
     cfg = settings or BusinessSettings.load()
+    rates = resolve_city_rates(cfg, city)
     vol = _to_decimal(volume_cbm)
     if vol <= 0:
         return {
@@ -76,13 +84,14 @@ def cbm_cost(*, volume_cbm, settings: BusinessSettings | None = None) -> dict[st
             "advance_usd": 0.0,
             "detail": "aucun CBM",
         }
-    total = (vol * cfg.cbm_rate_usd).quantize(Decimal("0.01"))
+    rate = rates["cbm_rate_usd"]
+    total = (vol * rate).quantize(Decimal("0.01"))
     advance = (total * CBM_ADVANCE_RATIO).quantize(Decimal("0.01"))
     return {
         "volume_cbm": float(vol),
         "amount_usd": float(total),
         "advance_usd": float(advance),
-        "detail": f"{vol} CBM × {cfg.cbm_rate_usd} $/m³ (acompte 50%)",
+        "detail": f"{vol} CBM × {rate} $/m³ (acompte 50%)",
     }
 
 
@@ -127,6 +136,7 @@ def build_expedition_quote(
     weight_kg_override=None,
     settings: BusinessSettings | None = None,
     client_stars: int | None = None,
+    destination_city: str | None = None,
 ) -> dict[str, Any]:
     """
     Calcule le montant d'expédition à partir des tarifs et du colis.
@@ -139,8 +149,15 @@ def build_expedition_quote(
     La catégorie vient de l'enregistrement admin du colis (description),
     pas d'un choix client à l'expédition.
     """
+    from pricing.cities import normalize_pricing_city
+
     cfg = settings or BusinessSettings.load()
     mode = (mode or "").strip().lower()
+    city = destination_city
+    if not city:
+        owner = getattr(getattr(parcels[0], "order", None), "user", None)
+        city = getattr(owner, "city", None) if owner is not None else None
+    city = normalize_pricing_city(city)
     if mode not in {"bujito_digital", "other_forwarder"}:
         raise ValueError("mode invalide")
 
@@ -221,6 +238,7 @@ def build_expedition_quote(
                 weight_kg=weight,
                 quantity=(computer_quantity or len(parcels)) if category == "computer" else 1,
                 settings=cfg,
+                city=city,
             )
             if not ship.get("available", True):
                 raise ValueError(ship.get("message") or "catégorie indisponible")
@@ -239,7 +257,7 @@ def build_expedition_quote(
                 raise ValueError(
                     "Volume (CBM) du colis manquant : impossible de calculer le tarif bateau."
                 )
-            cbm = cbm_cost(volume_cbm=volume, settings=cfg)
+            cbm = cbm_cost(volume_cbm=volume, settings=cfg, city=city)
             cbm_fee = _to_decimal(cbm["amount_usd"])
             cbm_advance = _to_decimal(cbm["advance_usd"])
 
@@ -267,6 +285,7 @@ def build_expedition_quote(
 
     return {
         "mode": mode,
+        "destination_city": city,
         "transport_mode": transport,
         "shipping_category": category,
         "forwarder_address": address,
