@@ -4,7 +4,7 @@ from rest_framework import serializers
 from core.serializers import PublicUUIDSerializerMixin
 from parcels.media_urls import absolute_media_url
 from users.roles import CLIENT_ROLES
-from .models import Expense, SupportMessage
+from .models import Expense, SupportAutoMessage, SupportMessage, SupportQuickReply
 
 User = get_user_model()
 
@@ -219,3 +219,38 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
         name = self.get_attachment_name(obj) or ''
         ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
         return ext in {'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'}
+
+
+class SupportQuickReplySerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
+    class Meta:
+        model = SupportQuickReply
+        fields = (
+            'id',
+            'label',
+            'body',
+            'language',
+            'sort_order',
+            'is_active',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('id', 'created_at', 'updated_at')
+
+
+class SupportAutoMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
+    class Meta:
+        model = SupportAutoMessage
+        fields = (
+            'id',
+            'name',
+            'body',
+            'language',
+            'trigger',
+            'scheduled_time',
+            'target',
+            'is_active',
+            'last_run_date',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('id', 'last_run_date', 'created_at', 'updated_at')

@@ -440,3 +440,51 @@ class AdminReportsApiTests(TestCase):
         )
         self.assertEqual(cleared.status_code, 200)
         self.assertFalse(cleared.json()['needs_followup'])
+
+    def test_support_quick_replies_and_first_auto_message(self):
+        from reports.models import SupportAutoMessage, SupportMessage, SupportQuickReply
+
+        SupportQuickReply.objects.all().delete()
+        SupportAutoMessage.objects.all().delete()
+
+        self.client.force_authenticate(self.admin)
+        created = self.client.post(
+            '/api/admin/support-quick-replies/',
+            {
+                'label': 'Salut',
+                'body': 'Bonjour, comment allons-nous ?',
+                'language': 'fr',
+                'sort_order': 0,
+                'is_active': True,
+            },
+            format='json',
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+
+        listed = self.client.get(
+            '/api/admin/support-quick-replies/', {'for_chat': 'true', 'lang': 'fr'}
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.json()), 1)
+
+        SupportAutoMessage.objects.create(
+            name='Welcome',
+            body='Bienvenue, un agent arrive.',
+            language='all',
+            trigger=SupportAutoMessage.TRIGGER_FIRST_MESSAGE,
+            is_active=True,
+        )
+
+        self.client.force_authenticate(self.client_user)
+        first = self.client.post(
+            '/api/support-chat/',
+            {'body': 'Hello team'},
+            format='json',
+        )
+        self.assertEqual(first.status_code, 201, first.data)
+        thread = self.client.get('/api/support-chat/')
+        self.assertEqual(thread.status_code, 200)
+        bodies = [m['body'] for m in thread.json()['results']]
+        self.assertIn('Hello team', bodies)
+        self.assertIn('Bienvenue, un agent arrive.', bodies)
+        self.assertEqual(SupportMessage.objects.filter(client=self.client_user).count(), 2)

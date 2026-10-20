@@ -7,7 +7,12 @@ from .views import (
     AdminAccountingView,
     AdminClientServiceView,
     AdminStatsView,
+    SupportAutoMessageDetailView,
+    SupportAutoMessageListCreateView,
+    SupportAutoMessageRunDueView,
     SupportChatView,
+    SupportQuickReplyDetailView,
+    SupportQuickReplyListCreateView,
 )
 
 urlpatterns = [
@@ -37,6 +42,31 @@ urlpatterns = [
         'client-service/<str:client_id>/followup/',
         AdminClientServiceView.as_view(),
         name='admin-client-service-followup',
+    ),
+    path(
+        'support-quick-replies/',
+        SupportQuickReplyListCreateView.as_view(),
+        name='support-quick-replies',
+    ),
+    path(
+        'support-quick-replies/<str:pk>/',
+        SupportQuickReplyDetailView.as_view(),
+        name='support-quick-reply-detail',
+    ),
+    path(
+        'support-auto-messages/',
+        SupportAutoMessageListCreateView.as_view(),
+        name='support-auto-messages',
+    ),
+    path(
+        'support-auto-messages/run-due/',
+        SupportAutoMessageRunDueView.as_view(),
+        name='support-auto-messages-run-due',
+    ),
+    path(
+        'support-auto-messages/<str:pk>/',
+        SupportAutoMessageDetailView.as_view(),
+        name='support-auto-message-detail',
     ),
     path('support-chat/', SupportChatView.as_view(), name='support-chat'),
     path(

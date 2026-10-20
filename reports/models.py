@@ -140,3 +140,93 @@ class ClientFollowUp(PublicUUIDModel):
 
     def __str__(self):
         return f'FollowUp(client={self.client_id}, active={self.needs_followup})'
+
+
+class SupportQuickReply(PublicUUIDModel):
+    """Réponse rapide (chip) configurable dans le chat Service client."""
+
+    label = models.CharField(max_length=48, verbose_name=_('Libellé'))
+    body = models.TextField(verbose_name=_('Message'))
+    language = models.CharField(
+        max_length=8,
+        default='all',
+        db_index=True,
+        verbose_name=_('Langue'),
+        help_text=_('fr, en ou all'),
+    )
+    sort_order = models.PositiveIntegerField(default=0, verbose_name=_('Ordre'))
+    is_active = models.BooleanField(default=True, db_index=True, verbose_name=_('Actif'))
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+        verbose_name = _('Réponse rapide support')
+        verbose_name_plural = _('Réponses rapides support')
+
+    def __str__(self):
+        return self.label
+
+
+class SupportAutoMessage(PublicUUIDModel):
+    """Message automatique : premier contact client ou envoi programmé quotidien."""
+
+    TRIGGER_FIRST_MESSAGE = 'first_client_message'
+    TRIGGER_SCHEDULED = 'scheduled_daily'
+    TRIGGER_CHOICES = [
+        (TRIGGER_FIRST_MESSAGE, _('Après le 1er message client')),
+        (TRIGGER_SCHEDULED, _('Envoi programmé (quotidien)')),
+    ]
+
+    TARGET_FOLLOWUP = 'followup'
+    TARGET_UNREAD = 'unread'
+    TARGET_ACTIVE = 'active_threads'
+    TARGET_CHOICES = [
+        (TARGET_FOLLOWUP, _('Clients à rappeler')),
+        (TARGET_UNREAD, _('Conversations non lues')),
+        (TARGET_ACTIVE, _('Discussions actives (30 jours)')),
+    ]
+
+    name = models.CharField(max_length=100, verbose_name=_('Nom'))
+    body = models.TextField(verbose_name=_('Message'))
+    language = models.CharField(
+        max_length=8,
+        default='all',
+        db_index=True,
+        verbose_name=_('Langue'),
+    )
+    trigger = models.CharField(
+        max_length=32,
+        choices=TRIGGER_CHOICES,
+        default=TRIGGER_FIRST_MESSAGE,
+        db_index=True,
+        verbose_name=_('Déclencheur'),
+    )
+    scheduled_time = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name=_('Heure d’envoi'),
+        help_text=_('Pour un envoi programmé quotidien (fuseau du serveur).'),
+    )
+    target = models.CharField(
+        max_length=32,
+        choices=TARGET_CHOICES,
+        default=TARGET_FOLLOWUP,
+        verbose_name=_('Cibles (programmé)'),
+    )
+    is_active = models.BooleanField(default=True, db_index=True, verbose_name=_('Actif'))
+    last_run_date = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name=_('Dernier envoi (jour)'),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'id']
+        verbose_name = _('Message auto support')
+        verbose_name_plural = _('Messages auto support')
+
+    def __str__(self):
+        return self.name

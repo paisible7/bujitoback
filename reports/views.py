@@ -21,8 +21,23 @@ from parcels.models import Order, Parcel
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 from payments.models import Payment
 from payments.serializers import PaymentSerializer
-from .models import ClientFollowUp, Expense, SupportMessage
-from .serializers import ExpenseSerializer, SupportMessageSerializer
+from .models import (
+    ClientFollowUp,
+    Expense,
+    SupportAutoMessage,
+    SupportMessage,
+    SupportQuickReply,
+)
+from .serializers import (
+    ExpenseSerializer,
+    SupportAutoMessageSerializer,
+    SupportMessageSerializer,
+    SupportQuickReplySerializer,
+)
+from .support_automation import (
+    run_due_scheduled_auto_messages,
+    send_first_client_message_autos,
+)
 from users.permissions import IsAppAdmin
 from users.roles import CLIENT_ROLES, is_app_admin
 from users.serializers import (
@@ -874,6 +889,12 @@ class SupportChatView(APIView):
         return request.user, None
 
     def _admin_threads_response(self, request):
+        # Déclenche les envois programmés dus (1×/jour max par règle).
+        try:
+            run_due_scheduled_auto_messages()
+        except Exception:
+            pass
+
         search = (request.query_params.get('search') or '').strip()
         followup_only = (request.query_params.get('followup') or '').strip().lower() in (
             '1',
@@ -1045,6 +1066,19 @@ class SupportChatView(APIView):
             is_read=False,
         )
 
+        if not is_app_admin(request.user):
+            try:
+                preferred = (
+                    getattr(request.user, 'preferred_language', None)
+                    or request.headers.get('Accept-Language', '')[:2]
+                    or None
+                )
+                send_first_client_message_autos(
+                    client, preferred_lang=preferred
+                )
+            except Exception:
+                pass
+
         # Notification push / in-app au destinataire
         try:
             from notifications.utils import notify_admins, send_fcm_notification
@@ -1093,3 +1127,63 @@ class SupportChatView(APIView):
             SupportMessageSerializer(msg, context={'request': request}).data,
             status=201,
         )
+
+
+class SupportQuickReplyListCreateView(generics.ListCreateAPIView):
+    """CRUD réponses rapides — lecture admin (chips chat) + gestion."""
+
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    serializer_class = SupportQuickReplySerializer
+
+    def get_queryset(self):
+        qs = SupportQuickReply.objects.all()
+        lang = (self.request.query_params.get('lang') or '').strip().lower()
+        active_only = (self.request.query_params.get('active') or '').strip().lower() in (
+            '1',
+            'true',
+            'yes',
+            'on',
+        )
+        if active_only or self.request.query_params.get('for_chat') in (
+            '1',
+            'true',
+            'yes',
+        ):
+            qs = qs.filter(is_active=True)
+        if lang:
+            qs = qs.filter(Q(language__iexact=lang) | Q(language__iexact='all'))
+        return qs.order_by('sort_order', 'id')
+
+
+class SupportQuickReplyDetailView(UUIDLookupMixin, generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    serializer_class = SupportQuickReplySerializer
+    queryset = SupportQuickReply.objects.all()
+
+
+class SupportAutoMessageListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    serializer_class = SupportAutoMessageSerializer
+    queryset = SupportAutoMessage.objects.all().order_by('name', 'id')
+
+
+class SupportAutoMessageDetailView(UUIDLookupMixin, generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+    serializer_class = SupportAutoMessageSerializer
+    queryset = SupportAutoMessage.objects.all()
+
+
+class SupportAutoMessageRunDueView(APIView):
+    """Force le passage des envois programmés dus (ou force=true)."""
+
+    permission_classes = [IsAuthenticated, IsAppAdmin]
+
+    def post(self, request):
+        force = str(request.data.get('force') or '').strip().lower() in (
+            '1',
+            'true',
+            'yes',
+            'on',
+        )
+        result = run_due_scheduled_auto_messages(force=force)
+        return Response(result)
