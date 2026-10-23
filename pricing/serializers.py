@@ -24,6 +24,8 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
             "sensitive_note",
             "phone_flat_fee",
             "computer_flat_fee",
+            "electronics_battery_flat_fee",
+            "fragile_extra_flat_fee",
             "phone_days",
             "grouping_flat_max_kg",
             "grouping_flat_fee",
@@ -80,7 +82,15 @@ class BusinessSettingsSerializer(serializers.ModelSerializer):
 class EstimateSerializer(serializers.Serializer):
     kind = serializers.ChoiceField(choices=["shipping", "grouping", "cbm"])
     category = serializers.ChoiceField(
-        choices=["ordinary", "express", "sensitive", "phone", "computer"],
+        choices=[
+            "ordinary",
+            "express",
+            "sensitive",
+            "phone",
+            "computer",
+            "electronics_battery",
+            "fragile_extra",
+        ],
         required=False,
         default="ordinary",
     )

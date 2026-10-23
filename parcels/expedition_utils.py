@@ -100,12 +100,33 @@ def parcel_shipping_category(parcel) -> str:
     raw = (getattr(parcel, "description", None) or "").strip().lower()
     if not raw:
         return "ordinary"
-    if raw in {"ordinary", "sensitive", "phone", "computer", "express"}:
+    if raw in {
+        "ordinary",
+        "sensitive",
+        "phone",
+        "computer",
+        "express",
+        "electronics_battery",
+        "fragile_extra",
+    }:
         return raw
     if any(k in raw for k in ("ordinateur", "computer", "laptop", "notebook")):
         return "computer"
     if any(k in raw for k in ("téléphone", "telephone", "phone")):
         return "phone"
+    if any(
+        k in raw
+        for k in (
+            "electronique",
+            "électronique",
+            "electronics",
+            "batterie",
+            "battery",
+        )
+    ):
+        return "electronics_battery"
+    if any(k in raw for k in ("fragile", "fragiles", "extras fragiles")):
+        return "fragile_extra"
     if any(k in raw for k in ("sensible", "sensitive")):
         return "sensitive"
     if "express" in raw:
@@ -116,9 +137,17 @@ def parcel_shipping_category(parcel) -> str:
 
 
 def parcels_shipping_category(parcels: list) -> str:
-    """Priorité : computer > phone > sensitive > express > ordinary."""
+    """Priorité : computer > electronics > fragile > phone > sensitive > express > ordinary."""
     cats = {parcel_shipping_category(p) for p in parcels}
-    for key in ("computer", "phone", "sensitive", "express", "ordinary"):
+    for key in (
+        "computer",
+        "electronics_battery",
+        "fragile_extra",
+        "phone",
+        "sensitive",
+        "express",
+        "ordinary",
+    ):
         if key in cats:
             return key
     return "ordinary"
@@ -222,11 +251,25 @@ def build_expedition_quote(
             category = parcels_shipping_category(parcels)
             requested = (shipping_category or "").strip().lower()
             # Admin peut encore forcer une catégorie via l'API si besoin.
-            if requested in {"ordinary", "sensitive", "phone", "computer", "express"}:
+            _air_cats = {
+                "ordinary",
+                "sensitive",
+                "phone",
+                "computer",
+                "express",
+                "electronics_battery",
+                "fragile_extra",
+            }
+            if requested in _air_cats:
                 category = requested
-            if category not in {"ordinary", "sensitive", "phone", "computer", "express"}:
+            if category not in _air_cats:
                 category = "ordinary"
-            if weight <= 0 and category not in {"phone", "computer"}:
+            if weight <= 0 and category not in {
+                "phone",
+                "computer",
+                "electronics_battery",
+                "fragile_extra",
+            }:
                 raise ValueError(
                     "Poids du colis manquant : impossible de calculer le tarif avion."
                 )

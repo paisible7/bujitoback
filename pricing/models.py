@@ -68,6 +68,18 @@ class BusinessSettings(PublicUUIDModel):
         default=Decimal("100.00"),
         verbose_name=_("Ordinateur — forfait par pièce $"),
     )
+    electronics_battery_flat_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("22.00"),
+        verbose_name=_("Électronique avec batterie — forfait $"),
+    )
+    fragile_extra_flat_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("20.00"),
+        verbose_name=_("Extras fragiles — forfait $"),
+    )
     phone_days = models.PositiveSmallIntegerField(
         default=21,
         verbose_name=_("Téléphone — délai (jours)"),

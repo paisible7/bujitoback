@@ -41,7 +41,8 @@ def shipping_cost(
     city=None,
 ) -> dict[str, Any]:
     """
-    category: ordinary | express | sensitive | phone | computer
+    category: ordinary | express | sensitive | phone | computer |
+              electronics_battery | fragile_extra
     city: Kinshasa (défaut) ou Lubumbashi
     """
     cfg = settings or BusinessSettings.load()
@@ -60,6 +61,18 @@ def shipping_cost(
         days = None
         available = True
         detail = f"{pieces} × forfait ordinateur à {rates['computer_flat_fee']} $/pièce"
+    elif cat in {"electronics_battery", "electronics", "battery"}:
+        cat = "electronics_battery"
+        amount = rates["electronics_battery_flat_fee"]
+        days = rates["phone_days"]
+        available = True
+        detail = "forfait électronique avec batterie"
+    elif cat in {"fragile_extra", "fragile", "extras_fragiles"}:
+        cat = "fragile_extra"
+        amount = rates["fragile_extra_flat_fee"]
+        days = rates["phone_days"]
+        available = True
+        detail = "forfait extras fragiles"
     elif cat == "express":
         available = bool(cfg.express_available)
         days = rates["express_days"]

@@ -19,6 +19,8 @@ CITY_RATE_KEYS = (
     'phone_flat_fee',
     'phone_days',
     'computer_flat_fee',
+    'electronics_battery_flat_fee',
+    'fragile_extra_flat_fee',
     'cbm_rate_usd',
 )
 
