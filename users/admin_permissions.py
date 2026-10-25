@@ -23,6 +23,8 @@ PERM_STATS = 'stats'
 PERM_ACCOUNTING = 'accounting'
 PERM_CLIENT_SERVICE = 'client_service'
 PERM_AGENTS = 'agents'
+PERM_EXPENSES_CHINA = 'expenses_china'
+PERM_SHIPMENTS_RECEPTION = 'shipments_reception'
 
 ADMIN_PERMISSION_KEYS: tuple[str, ...] = (
     PERM_ORDERS,
@@ -39,6 +41,8 @@ ADMIN_PERMISSION_KEYS: tuple[str, ...] = (
     PERM_ACCOUNTING,
     PERM_CLIENT_SERVICE,
     PERM_AGENTS,
+    PERM_EXPENSES_CHINA,
+    PERM_SHIPMENTS_RECEPTION,
 )
 
 ADMIN_PERMISSION_SET = frozenset(ADMIN_PERMISSION_KEYS)
@@ -59,6 +63,32 @@ ADMIN_PERMISSION_LABELS_FR: dict[str, str] = {
     PERM_ACCOUNTING: 'Comptabilité',
     PERM_CLIENT_SERVICE: 'Service client',
     PERM_AGENTS: 'Agents & accès',
+    PERM_EXPENSES_CHINA: 'Dépenses Chine',
+    PERM_SHIPMENTS_RECEPTION: 'Réception MCO (aéroport)',
+}
+
+
+# Presets métier (référence Super Admin / Flutter).
+ADMIN_ROLE_PRESETS: dict[str, tuple[str, ...]] = {
+    'parcel_manager': (
+        PERM_GROUPING,
+        PERM_SHIPMENTS,
+        PERM_PARCELS,
+        PERM_IMPORT,
+        PERM_EXPENSES_CHINA,
+    ),
+    'client_service': (
+        PERM_CLIENT_SERVICE,
+        PERM_PARCELS,
+    ),
+    'accountant': (
+        PERM_ACCOUNTING,
+        PERM_PAYMENTS,
+        PERM_STATS,
+    ),
+    'reception': (
+        PERM_SHIPMENTS_RECEPTION,
+    ),
 }
 
 
@@ -130,3 +160,45 @@ def effective_admin_permissions(user) -> list[str]:
     if is_platform_superuser(user) or admin_has_full_access(user):
         return list(ADMIN_PERMISSION_KEYS)
     return get_user_admin_permissions(user)
+
+
+def can_pay_worker_salary(user) -> bool:
+    """Super Admin ou comptable (permission accounting)."""
+    from .roles import is_platform_superuser
+
+    if is_platform_superuser(user):
+        return True
+    return has_admin_permission(user, PERM_ACCOUNTING)
+
+
+def can_list_workers_for_salary(user) -> bool:
+    return can_pay_worker_salary(user)
+
+
+def is_shipments_reception_only(user) -> bool:
+    """Accès MCO limité à la réception aéroport (arrived)."""
+    from .roles import is_platform_superuser
+
+    if is_platform_superuser(user) or admin_has_full_access(user):
+        return False
+    if has_admin_permission(user, PERM_SHIPMENTS):
+        return False
+    return has_admin_permission(user, PERM_SHIPMENTS_RECEPTION)
+
+
+def can_manage_china_expenses(user) -> bool:
+    from .roles import is_platform_superuser
+
+    if is_platform_superuser(user):
+        return True
+    return has_admin_permission(user, PERM_ACCOUNTING) or has_admin_permission(
+        user, PERM_EXPENSES_CHINA
+    )
+
+
+def can_view_full_accounting(user) -> bool:
+    from .roles import is_platform_superuser
+
+    if is_platform_superuser(user):
+        return True
+    return has_admin_permission(user, PERM_ACCOUNTING)

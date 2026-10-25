@@ -488,3 +488,123 @@ class AdminReportsApiTests(TestCase):
         self.assertIn('Hello team', bodies)
         self.assertIn('Bienvenue, un agent arrive.', bodies)
         self.assertEqual(SupportMessage.objects.filter(client=self.client_user).count(), 2)
+
+
+class ChinaExpensesPermissionTests(TestCase):
+    def setUp(self):
+        from reports.models import Expense
+
+        self.client = APIClient()
+        self.parcel_mgr = User.objects.create_user(
+            email='china-mgr@bujito.com',
+            password='Pass123!',
+            role=ROLE_ADMIN,
+            permissions_restricted=True,
+            admin_permissions=[
+                'grouping',
+                'shipments',
+                'parcels',
+                'import',
+                'expenses_china',
+            ],
+        )
+        self.accountant = User.objects.create_user(
+            email='china-acc@bujito.com',
+            password='Pass123!',
+            role=ROLE_ADMIN,
+            permissions_restricted=True,
+            admin_permissions=['accounting', 'payments', 'stats'],
+        )
+        self.reception = User.objects.create_user(
+            email='china-recep@bujito.com',
+            password='Pass123!',
+            role=ROLE_ADMIN,
+            permissions_restricted=True,
+            admin_permissions=['shipments_reception'],
+        )
+        Expense.objects.create(
+            name='Freight CN',
+            category='Chine',
+            amount=Decimal('40.00'),
+            currency='USD',
+            recorded_by=self.parcel_mgr,
+        )
+        Expense.objects.create(
+            name='Office',
+            category='Bureau',
+            amount=Decimal('15.00'),
+            currency='USD',
+            recorded_by=self.accountant,
+        )
+
+    def _proof(self):
+        image = BytesIO()
+        Image.new('RGB', (8, 8), color=(20, 180, 255)).save(image, format='JPEG')
+        return SimpleUploadedFile(
+            'proof.jpg',
+            image.getvalue(),
+            content_type='image/jpeg',
+        )
+
+    def test_parcel_manager_china_only_not_full_accounting(self):
+        self.client.force_authenticate(self.parcel_mgr)
+        accounting = self.client.get('/api/admin/accounting/')
+        self.assertEqual(accounting.status_code, 403)
+        self.assertTrue(accounting.json().get('china_expenses_only'))
+
+        expenses = self.client.get('/api/admin/accounting/expenses/')
+        self.assertEqual(expenses.status_code, 200)
+        payload = expenses.json()
+        rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        names = [e['name'] for e in rows]
+        self.assertIn('Freight CN', names)
+        self.assertNotIn('Office', names)
+
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                created = self.client.post(
+                    '/api/admin/accounting/expenses/',
+                    {
+                        'name': 'Warehouse CN',
+                        'category': 'Divers',
+                        'amount': '22.00',
+                        'currency': 'USD',
+                        'expense_date': timezone.localdate().isoformat(),
+                        'proof_image': self._proof(),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(created.status_code, 201, created.data)
+                self.assertEqual(created.data['category'], 'Chine')
+
+    def test_accountant_sees_full_accounting_and_all_expenses(self):
+        self.client.force_authenticate(self.accountant)
+        accounting = self.client.get('/api/admin/accounting/')
+        self.assertEqual(accounting.status_code, 200)
+        expenses = self.client.get('/api/admin/accounting/expenses/')
+        self.assertEqual(expenses.status_code, 200)
+        payload = expenses.json()
+        rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        names = [e['name'] for e in rows]
+        self.assertIn('Freight CN', names)
+        self.assertIn('Office', names)
+
+    def test_reception_cannot_manage_expenses(self):
+        self.client.force_authenticate(self.reception)
+        expenses = self.client.get('/api/admin/accounting/expenses/')
+        self.assertEqual(expenses.status_code, 200)
+        payload = expenses.json()
+        rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        self.assertEqual(len(rows), 0)
+        created = self.client.post(
+            '/api/admin/accounting/expenses/',
+            {
+                'name': 'Nope',
+                'category': 'Chine',
+                'amount': '1.00',
+                'currency': 'USD',
+                'expense_date': timezone.localdate().isoformat(),
+            },
+            format='json',
+        )
+        self.assertEqual(created.status_code, 403)

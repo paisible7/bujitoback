@@ -229,7 +229,129 @@ class ProfilePhotoAndAgentAccessTests(TestCase):
         self.assertTrue(last.get('proof_url'))
         mine = self.client.get('/api/auth/profile/salary/')
         self.assertEqual(mine.status_code, 200)
-        self.assertEqual(len(mine.data), 1)
+        self.assertIn('results', mine.data)
+        self.assertEqual(len(mine.data['results']), 1)
+        # Sans encaissement, le solde dû reste 0 (paiement manuel hors accruals).
+        self.assertEqual(mine.data['month_total'], 0)
+        from reports.models import Expense
+
+        self.assertTrue(
+            Expense.objects.filter(category='Salaire', amount='120.50').exists()
+        )
+
+    def test_salary_accrual_from_collections_and_multi_pay(self):
+        """Commission auto = encaissé × % ; paiement multi remet le solde à 0."""
+        from payments.models import Payment, PaymentMethod
+
+        self.agent.service_percentages = {'orders': 2, 'grouping': 5}
+        self.agent.save(update_fields=['service_percentages'])
+
+        method = PaymentMethod.objects.create(name='Test', code='test_cash')
+        client = User.objects.create_user(
+            email='buyer@bujito.com',
+            password='Pass123!',
+            full_name='Buyer',
+        )
+        order = Order.objects.create(user=client, quote_ready=True, total_amount=1000)
+        Payment.objects.create(
+            user=client,
+            order=order,
+            amount='1000.00',
+            currency='USD',
+            reference='PAY-ORD-1',
+            method=method,
+            status='completed',
+            provider_raw_response={'type': 'order', 'service_amount': 1000},
+        )
+
+        self.client.force_authenticate(self.agent)
+        dash = self.client.get('/api/auth/profile/salary/')
+        self.assertEqual(dash.status_code, 200)
+        # 1000$ × 2% = 20$
+        self.assertEqual(dash.data['month_total'], 20.0)
+        orders_row = next(
+            s for s in dash.data['by_service'] if s['service'] == 'orders'
+        )
+        self.assertEqual(orders_row['balance'], 20.0)
+        self.assertEqual(orders_row['collected'], 1000.0)
+
+        self.client.force_authenticate(self.superuser)
+        pay = self.client.post(
+            f'/api/auth/users/{self.agent.id}/salary/',
+            {'services': ['orders', 'grouping'], 'note': 'Paiement multi'},
+            format='json',
+        )
+        self.assertEqual(pay.status_code, 201)
+        self.assertEqual(len(pay.data['results']), 1)  # grouping solde 0 → ignoré
+        self.assertEqual(float(pay.data['results'][0]['amount']), 20.0)
+
+        self.client.force_authenticate(self.agent)
+        after = self.client.get('/api/auth/profile/salary/')
+        self.assertEqual(after.data['month_total'], 0)
+        orders_after = next(
+            s for s in after.data['by_service'] if s['service'] == 'orders'
+        )
+        self.assertEqual(orders_after['balance'], 0)
+
+    def test_expenses_and_losses_reduce_commission_base(self):
+        """Dépenses + pertes diminuent l’encaissé net avant le %."""
+        from payments.models import Payment, PaymentMethod
+        from reports.models import Expense
+
+        self.agent.service_percentages = {'orders': 10}
+        self.agent.save(update_fields=['service_percentages'])
+
+        method = PaymentMethod.objects.create(name='Cash2', code='test_cash_2')
+        client = User.objects.create_user(
+            email='buyer2@bujito.com',
+            password='Pass123!',
+            full_name='Buyer2',
+        )
+        order = Order.objects.create(user=client, quote_ready=True, total_amount=1000)
+        Payment.objects.create(
+            user=client,
+            order=order,
+            amount='1000.00',
+            currency='USD',
+            reference='PAY-ORD-2',
+            method=method,
+            status='completed',
+            provider_raw_response={'type': 'order', 'service_amount': 1000},
+        )
+        Expense.objects.create(
+            name='Fournisseur',
+            category='Logistique',
+            entry_type=Expense.ENTRY_EXPENSE,
+            amount='80.00',
+            currency='USD',
+            recorded_by=self.superuser,
+        )
+        Expense.objects.create(
+            name='Casse',
+            category='Perte',
+            entry_type=Expense.ENTRY_LOSS,
+            amount='20.00',
+            currency='USD',
+            recorded_by=self.superuser,
+        )
+        # Miroir salaire : ne doit PAS réduire la base.
+        Expense.objects.create(
+            name='Agent',
+            category='Salaire',
+            entry_type=Expense.ENTRY_EXPENSE,
+            amount='50.00',
+            currency='USD',
+            recorded_by=self.superuser,
+        )
+
+        self.client.force_authenticate(self.agent)
+        dash = self.client.get('/api/auth/profile/salary/')
+        self.assertEqual(dash.status_code, 200)
+        # Net = 1000 − 80 − 20 = 900 ; 10 % = 90
+        self.assertEqual(dash.data['collected_gross_total'], 1000.0)
+        self.assertEqual(dash.data['deductions_total'], 100.0)
+        self.assertEqual(dash.data['collected_total'], 900.0)
+        self.assertEqual(dash.data['month_total'], 90.0)
 
     def test_admin_cannot_patch_agent_permissions(self):
         other = User.objects.create_user(
@@ -246,3 +368,108 @@ class ProfilePhotoAndAgentAccessTests(TestCase):
         self.assertNotEqual(response.status_code, 200)
         self.agent.refresh_from_db()
         self.assertEqual(self.agent.admin_permissions, [])
+
+    def test_accountant_can_pay_salary_but_not_edit_permissions(self):
+        accountant = User.objects.create_user(
+            email='accountant@bujito.com',
+            password='Pass123!',
+            role='admin',
+            full_name='Comptable',
+            permissions_restricted=True,
+            admin_permissions=['accounting', 'payments', 'stats'],
+        )
+        self.client.force_authenticate(accountant)
+        pay = self.client.post(
+            f'/api/auth/users/{self.agent.id}/salary/',
+            {
+                'amount': '80.00',
+                'currency': 'USD',
+                'service': 'orders',
+                'note': 'Paie comptable',
+            },
+            format='multipart',
+        )
+        self.assertEqual(pay.status_code, 201, pay.data)
+        self.assertEqual(str(pay.data['amount']), '80.00')
+
+        listed = self.client.get('/api/auth/users/', {'role': 'admin'})
+        self.assertEqual(listed.status_code, 200)
+        payload = listed.data
+        rows = payload.get('results', payload) if isinstance(payload, dict) else payload
+        emails = [u['email'] for u in rows]
+        self.assertIn(self.agent.email, emails)
+
+        blocked = self.client.patch(
+            f'/api/auth/users/{self.agent.id}/',
+            {'admin_permissions': ['stats'], 'service_percentages': {'orders': 9}},
+            format='json',
+        )
+        self.assertNotEqual(blocked.status_code, 200)
+        self.agent.refresh_from_db()
+        self.assertEqual(self.agent.admin_permissions, [])
+
+
+class AdminRolePermissionHelperTests(TestCase):
+    def test_presets_and_helpers(self):
+        from users.admin_permissions import (
+            ADMIN_ROLE_PRESETS,
+            PERM_ACCOUNTING,
+            PERM_EXPENSES_CHINA,
+            PERM_SHIPMENTS,
+            PERM_SHIPMENTS_RECEPTION,
+            can_manage_china_expenses,
+            can_pay_worker_salary,
+            can_view_full_accounting,
+            is_shipments_reception_only,
+        )
+
+        self.assertEqual(
+            set(ADMIN_ROLE_PRESETS['parcel_manager']),
+            {'grouping', 'shipments', 'parcels', 'import', 'expenses_china'},
+        )
+        self.assertEqual(
+            set(ADMIN_ROLE_PRESETS['reception']),
+            {PERM_SHIPMENTS_RECEPTION},
+        )
+
+        accountant = User.objects.create_user(
+            email='acc-helper@bujito.com',
+            password='Pass123!',
+            role='admin',
+            permissions_restricted=True,
+            admin_permissions=list(ADMIN_ROLE_PRESETS['accountant']),
+        )
+        parcel_mgr = User.objects.create_user(
+            email='parcel-helper@bujito.com',
+            password='Pass123!',
+            role='admin',
+            permissions_restricted=True,
+            admin_permissions=list(ADMIN_ROLE_PRESETS['parcel_manager']),
+        )
+        reception = User.objects.create_user(
+            email='recep-helper@bujito.com',
+            password='Pass123!',
+            role='admin',
+            permissions_restricted=True,
+            admin_permissions=list(ADMIN_ROLE_PRESETS['reception']),
+        )
+
+        self.assertTrue(can_pay_worker_salary(accountant))
+        self.assertTrue(can_view_full_accounting(accountant))
+        self.assertTrue(can_manage_china_expenses(accountant))
+        self.assertFalse(is_shipments_reception_only(accountant))
+
+        self.assertFalse(can_pay_worker_salary(parcel_mgr))
+        self.assertFalse(can_view_full_accounting(parcel_mgr))
+        self.assertTrue(can_manage_china_expenses(parcel_mgr))
+        self.assertFalse(is_shipments_reception_only(parcel_mgr))
+
+        self.assertTrue(is_shipments_reception_only(reception))
+        self.assertFalse(can_manage_china_expenses(reception))
+        self.assertFalse(can_view_full_accounting(reception))
+        # Avec shipments complet, pas « réception seule ».
+        parcel_mgr.admin_permissions = [PERM_SHIPMENTS, PERM_SHIPMENTS_RECEPTION]
+        parcel_mgr.save(update_fields=['admin_permissions'])
+        self.assertFalse(is_shipments_reception_only(parcel_mgr))
+        self.assertIn(PERM_ACCOUNTING, ADMIN_ROLE_PRESETS['accountant'])
+        self.assertIn(PERM_EXPENSES_CHINA, ADMIN_ROLE_PRESETS['parcel_manager'])

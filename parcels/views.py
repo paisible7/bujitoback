@@ -34,6 +34,7 @@ from .ownership import parcels_for_user_q, user_owns_parcel
 from users.permissions import IsAdminUser
 from users.roles import is_app_admin
 from users.models import CustomUser
+from users.admin_permissions import is_shipments_reception_only
 from notifications.utils import notify_admins, send_fcm_notification
 from .pagination import OptionalPageNumberPagination
 from core.serializers import UUIDLookupMixin, lookup_optional, resolve_uuid_or_pk
@@ -2077,17 +2078,26 @@ class ShipmentBatchListCreateView(APIView):
 
     def get(self, request):
         batches = _shipment_batch_qs().all()
-        status_filter = (request.query_params.get('status') or '').strip().lower()
-        if status_filter and status_filter != 'all':
-            valid = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
-            if status_filter in valid:
-                batches = batches.filter(status=status_filter)
+        # Réception aéroport : uniquement les MCO arrivés.
+        if is_shipments_reception_only(request.user):
+            batches = batches.filter(status='arrived')
+        else:
+            status_filter = (request.query_params.get('status') or '').strip().lower()
+            if status_filter and status_filter != 'all':
+                valid = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
+                if status_filter in valid:
+                    batches = batches.filter(status=status_filter)
         return Response(
             ShipmentBatchSerializer(batches, many=True, context={'request': request}).data
         )
 
     def post(self, request):
         """Créer un lot manuel avec une liste de tracking_numbers."""
+        if is_shipments_reception_only(request.user):
+            return Response(
+                {'detail': 'Réception : création de lot MCO interdite.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         tracking_numbers = request.data.get('tracking_numbers') or []
         notes = request.data.get('notes') or ''
         admin_description = request.data.get('admin_description') or ''
@@ -2130,6 +2140,11 @@ class ShipmentBatchGenerateView(APIView):
     MAX_KG = 46.0
 
     def post(self, request):
+        if is_shipments_reception_only(request.user):
+            return Response(
+                {'detail': 'Réception : génération MCO interdite.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         parcels = list(_eligible_mco_parcels())
         items = []
         for p in parcels:
@@ -2216,6 +2231,18 @@ class ShipmentBatchDetailView(APIView):
         if new_status:
             if new_status not in {c[0] for c in ShipmentBatch.STATUS_CHOICES}:
                 return Response({"detail": "Statut MCO invalide."}, status=status.HTTP_400_BAD_REQUEST)
+            # Réception : uniquement arrived → out_for_delivery (récupéré aéroport).
+            if is_shipments_reception_only(request.user):
+                if batch.status != 'arrived' or new_status != 'out_for_delivery':
+                    return Response(
+                        {
+                            'detail': (
+                                'Réception : seuls les MCO « Arrivé » '
+                                'peuvent passer en « En livraison ».'
+                            )
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
             update_fields.extend(_apply_shipment_batch_status(batch, new_status))
 
         if 'notes' in request.data:
@@ -2244,6 +2271,11 @@ class ShipmentBatchBulkStatusView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request):
+        if is_shipments_reception_only(request.user):
+            return Response(
+                {'detail': 'Réception : mise à jour groupée interdite.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         ids = request.data.get('ids') or []
         new_status = request.data.get('status')
         if not isinstance(ids, list) or not ids:

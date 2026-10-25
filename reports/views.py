@@ -40,11 +40,17 @@ from .support_automation import (
 )
 from users.permissions import IsAppAdmin
 from users.roles import CLIENT_ROLES, is_app_admin
+from users.admin_permissions import (
+    can_manage_china_expenses,
+    can_view_full_accounting,
+)
 from users.serializers import (
     build_china_air_address,
     build_china_sea_address,
     build_china_warehouse_address,
 )
+
+CHINA_EXPENSE_CATEGORY = 'Chine'
 
 User = get_user_model()
 
@@ -426,6 +432,18 @@ class AdminAccountingView(APIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
 
     def get(self, request):
+        if not can_view_full_accounting(request.user):
+            # Dépenses Chine seules : pas de vue compta complète.
+            if can_manage_china_expenses(request.user):
+                return Response(
+                    {
+                        'detail': 'Accès compta complète refusé. Utilisez /expenses/ (Chine).',
+                        'china_expenses_only': True,
+                    },
+                    status=403,
+                )
+            return Response({'detail': 'Accès comptabilité refusé.'}, status=403)
+
         start, end = _period_bounds(request)
         type_filter = request.query_params.get('type', 'all')
         page = max(1, int(request.query_params.get('page') or 1))
@@ -511,6 +529,8 @@ class AdminAccountingExportView(APIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
 
     def get(self, request):
+        if not can_view_full_accounting(request.user):
+            return Response({'detail': 'Accès export compta refusé.'}, status=403)
         start, end = _period_bounds(request)
         type_filter = request.query_params.get('type', 'all')
         qs = Payment.objects.select_related('user', 'method', 'expedition').order_by('-created_at')
@@ -564,14 +584,42 @@ class AdminAccountingExpensesView(generics.ListCreateAPIView):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get_queryset(self):
-        return _accounting_expenses(self.request)
+        if not can_manage_china_expenses(self.request.user):
+            return Expense.objects.none()
+        qs = _accounting_expenses(self.request)
+        # Gestionnaire colis (dépenses Chine) : uniquement catégorie Chine.
+        if not can_view_full_accounting(self.request.user):
+            qs = qs.filter(category__icontains=CHINA_EXPENSE_CATEGORY)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        if not can_manage_china_expenses(request.user):
+            return Response({'detail': 'Accès dépenses refusé.'}, status=403)
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if not can_view_full_accounting(request.user):
+            # Force catégorie Chine pour le profil gestionnaire colis.
+            cat = (data.get('category') or '').strip()
+            if CHINA_EXPENSE_CATEGORY.lower() not in cat.lower():
+                data['category'] = CHINA_EXPENSE_CATEGORY
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(recorded_by=request.user)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=201, headers=headers)
 
 
 class AdminAccountingExpenseDetailView(UUIDLookupMixin, generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
     serializer_class = ExpenseSerializer
     parser_classes = [JSONParser, FormParser, MultiPartParser]
-    queryset = Expense.objects.select_related('recorded_by').prefetch_related('clients')
+
+    def get_queryset(self):
+        if not can_manage_china_expenses(self.request.user):
+            return Expense.objects.none()
+        qs = Expense.objects.select_related('recorded_by').prefetch_related('clients')
+        if not can_view_full_accounting(self.request.user):
+            qs = qs.filter(category__icontains=CHINA_EXPENSE_CATEGORY)
+        return qs
 
 
 class AdminClientServiceView(APIView):

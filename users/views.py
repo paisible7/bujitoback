@@ -6,6 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.db.models import Q, Count, Prefetch
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 from .roles import (
     CLIENT_ROLES,
@@ -33,7 +34,11 @@ from .serializers import (
 )
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from core.serializers import UUIDLookupMixin, resolve_uuid_or_pk
-from .admin_permissions import normalize_admin_permissions
+from .admin_permissions import (
+    normalize_admin_permissions,
+    can_pay_worker_salary,
+    can_list_workers_for_salary,
+)
 from .models import (
     AgentSalaryPayment,
     WORKER_SERVICE_KEYS,
@@ -189,6 +194,11 @@ class UserListCreateView(generics.ListCreateAPIView):
             qs = User.objects.filter(
                 role__in=[ROLE_CLIENT, ROLE_ADMIN, 'user'],
             ).order_by('role', 'email')
+        elif can_list_workers_for_salary(actor):
+            # Comptable : clients + travailleurs (pour payer les salaires).
+            qs = User.objects.filter(
+                role__in=[ROLE_CLIENT, ROLE_ADMIN, 'user'],
+            ).order_by('role', 'email')
         else:
             qs = User.objects.filter(role__in=CLIENT_ROLES).order_by('email')
 
@@ -197,6 +207,10 @@ class UserListCreateView(generics.ListCreateAPIView):
             role_filter = normalize_role(role_filter)
             if role_filter == ROLE_CLIENT:
                 qs = qs.filter(role__in=CLIENT_ROLES)
+            elif role_filter == ROLE_ADMIN and not (
+                is_platform_superuser(actor) or can_list_workers_for_salary(actor)
+            ):
+                qs = qs.none()
             else:
                 qs = qs.filter(role=role_filter)
 
@@ -336,27 +350,105 @@ class AgentSalaryView(APIView):
             from rest_framework.exceptions import NotFound
             raise NotFound('Travailleur introuvable.')
 
+    def _salary_dashboard(self, request, worker):
+        from .salary_accrual import worker_service_balances
+
+        payments = AgentSalaryPayment.objects.filter(worker=worker).order_by(
+            '-paid_at', '-created_at'
+        )
+        dash = worker_service_balances(worker)
+        dash['results'] = AgentSalaryPaymentSerializer(
+            payments[:100], many=True, context={'request': request}
+        ).data
+        return dash
+
+    def _mirror_expense(self, *, worker, payment, note, proof, recorded_by):
+        try:
+            from reports.models import Expense
+
+            worker_label = (worker.full_name or '').strip() or worker.email
+            service_label = payment.service or 'général'
+            expense = Expense(
+                name=worker_label[:200],
+                category='Salaire',
+                entry_type=Expense.ENTRY_EXPENSE,
+                description=(
+                    note
+                    or f'Paiement salaire / commission ({service_label})'
+                )[:2000],
+                amount=payment.amount,
+                currency=payment.currency,
+                expense_date=timezone.localdate(),
+                recorded_by=recorded_by,
+            )
+            if proof is not None:
+                try:
+                    proof.seek(0)
+                except Exception:
+                    pass
+                expense.proof_image.save(
+                    getattr(proof, 'name', 'salary_proof.jpg')
+                    or 'salary_proof.jpg',
+                    proof,
+                    save=False,
+                )
+            expense.save()
+        except Exception:
+            pass
+
+    def _parse_services(self, data):
+        """Accepte services[] / services (JSON ou CSV) / service (legacy)."""
+        raw = data.get('services')
+        if raw is None:
+            raw = data.getlist('services') if hasattr(data, 'getlist') else None
+        services = []
+        if isinstance(raw, list):
+            services = [str(s).strip().lower() for s in raw if str(s).strip()]
+        elif isinstance(raw, str) and raw.strip():
+            text = raw.strip()
+            if text.startswith('['):
+                import json
+
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        services = [
+                            str(s).strip().lower()
+                            for s in parsed
+                            if str(s).strip()
+                        ]
+                except Exception:
+                    services = [
+                        s.strip().lower()
+                        for s in text.split(',')
+                        if s.strip()
+                    ]
+            else:
+                services = [
+                    s.strip().lower() for s in text.split(',') if s.strip()
+                ]
+        if not services:
+            single = (data.get('service') or '').strip().lower()
+            if single:
+                services = [single]
+        return services
+
     def get(self, request, pk=None):
         if pk is None:
             worker = request.user
         else:
-            if not is_platform_superuser(request.user):
+            if not can_pay_worker_salary(request.user):
                 return Response(
-                    {'detail': 'Réservé au Super Admin.'},
+                    {'detail': 'Réservé au Super Admin ou comptable.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
             worker = self._worker(pk)
-        payments = AgentSalaryPayment.objects.filter(worker=worker)
-        return Response(
-            AgentSalaryPaymentSerializer(
-                payments, many=True, context={'request': request}
-            ).data
-        )
+        return Response(self._salary_dashboard(request, worker))
 
     def post(self, request, pk=None):
-        if not is_platform_superuser(request.user):
+        if not can_pay_worker_salary(request.user):
             return Response(
-                {'detail': 'Réservé au Super Admin.'},
+                {'detail': 'Réservé au Super Admin ou comptable.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
         if pk is None:
@@ -365,6 +457,84 @@ class AgentSalaryView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         worker = self._worker(pk)
+        from .salary_accrual import balances_for_services
+
+        note = (request.data.get('note') or '').strip()[:400]
+        status_value = (
+            request.data.get('status') or AgentSalaryPayment.STATUS_PAID
+        ).strip()
+        if status_value not in {
+            AgentSalaryPayment.STATUS_PAID,
+            AgentSalaryPayment.STATUS_PENDING,
+        }:
+            status_value = AgentSalaryPayment.STATUS_PAID
+        proof = request.FILES.get('proof_image')
+        currency = (request.data.get('currency') or 'USD').strip()[:10] or 'USD'
+
+        # Mode auto si `services` est fourni (multi) OU pas de montant manuel.
+        has_services_key = (
+            'services' in request.data
+            or (
+                hasattr(request.data, 'getlist')
+                and bool(request.data.getlist('services'))
+            )
+        )
+        amount_raw = request.data.get('amount')
+        services = self._parse_services(request.data)
+        use_auto = has_services_key or (
+            amount_raw in (None, '') and bool(services)
+        )
+
+        # Mode auto : multi-services → montant = solde dû (encaissé × %).
+        if use_auto:
+            unknown = [s for s in services if s not in WORKER_SERVICE_KEYS]
+            if unknown:
+                return Response(
+                    {'services': [f'Service(s) inconnu(s): {", ".join(unknown)}']},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            rows = balances_for_services(worker, services)
+            if not rows:
+                return Response(
+                    {
+                        'services': [
+                            'Aucun solde dû sur les services sélectionnés.'
+                        ]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            created = []
+            for row in rows:
+                payment = AgentSalaryPayment.objects.create(
+                    worker=worker,
+                    amount=row['balance'],
+                    currency=currency,
+                    service=row['service'],
+                    note=note,
+                    status=status_value,
+                    proof_image=proof if not created else None,
+                    recorded_by=request.user,
+                )
+                if status_value == AgentSalaryPayment.STATUS_PAID:
+                    self._mirror_expense(
+                        worker=worker,
+                        payment=payment,
+                        note=note,
+                        proof=proof if len(created) == 0 else None,
+                        recorded_by=request.user,
+                    )
+                created.append(payment)
+            payload = {
+                'results': AgentSalaryPaymentSerializer(
+                    created, many=True, context={'request': request}
+                ).data,
+                'dashboard': self._salary_dashboard(request, worker),
+            }
+            if len(created) == 1:
+                payload.update(payload['results'][0])
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        # Legacy : montant manuel + un service optionnel.
         try:
             amount = float(request.data.get('amount'))
         except (TypeError, ValueError):
@@ -377,21 +547,12 @@ class AgentSalaryView(APIView):
                 {'amount': ['Le montant doit être positif.']},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        currency = (request.data.get('currency') or 'USD').strip()[:10] or 'USD'
         service = (request.data.get('service') or '').strip().lower()
         if service and service not in WORKER_SERVICE_KEYS:
             return Response(
                 {'service': ['Service inconnu.']},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        note = (request.data.get('note') or '').strip()[:400]
-        status_value = (request.data.get('status') or AgentSalaryPayment.STATUS_PAID).strip()
-        if status_value not in {
-            AgentSalaryPayment.STATUS_PAID,
-            AgentSalaryPayment.STATUS_PENDING,
-        }:
-            status_value = AgentSalaryPayment.STATUS_PAID
-        proof = request.FILES.get('proof_image')
         payment = AgentSalaryPayment.objects.create(
             worker=worker,
             amount=amount,
@@ -402,6 +563,14 @@ class AgentSalaryView(APIView):
             proof_image=proof,
             recorded_by=request.user,
         )
+        if status_value == AgentSalaryPayment.STATUS_PAID:
+            self._mirror_expense(
+                worker=worker,
+                payment=payment,
+                note=note,
+                proof=proof,
+                recorded_by=request.user,
+            )
         return Response(
             AgentSalaryPaymentSerializer(
                 payment, context={'request': request}

@@ -574,3 +574,82 @@ class UuidLookupRegressionTests(TestCase):
         self.assertEqual(exp.status, "awaiting_payment")
         self.assertEqual(exp.forwarder_delivery_fee, Decimal("25.00"))
         self.assertEqual(exp.total_due_now, Decimal("35.00"))
+
+
+class ShipmentReceptionPermissionTests(TestCase):
+    def setUp(self):
+        from .models import ShipmentBatch
+
+        self.reception = CustomUser.objects.create_user(
+            email="reception@example.com",
+            password="test-password",
+            role="admin",
+            permissions_restricted=True,
+            admin_permissions=["shipments_reception"],
+        )
+        self.full_admin = CustomUser.objects.create_user(
+            email="ship-admin@example.com",
+            password="test-password",
+            role="admin",
+        )
+        self.client = APIClient()
+        self.arrived = ShipmentBatch.objects.create(
+            code="MCO-ARR-1",
+            status="arrived",
+            total_weight_kg=Decimal("12.00"),
+        )
+        self.open_batch = ShipmentBatch.objects.create(
+            code="MCO-OPEN-1",
+            status="open",
+            total_weight_kg=Decimal("10.00"),
+        )
+        self.signal_notification = patch("parcels.signals.send_fcm_notification")
+        self.signal_admin_notification = patch("parcels.signals.notify_admins")
+        self.signal_notification.start()
+        self.signal_admin_notification.start()
+        self.addCleanup(self.signal_notification.stop)
+        self.addCleanup(self.signal_admin_notification.stop)
+
+    def test_reception_lists_only_arrived(self):
+        self.client.force_authenticate(self.reception)
+        response = self.client.get(reverse("shipment-list-create"))
+        self.assertEqual(response.status_code, 200, response.data)
+        codes = [b["code"] for b in response.data]
+        self.assertIn("MCO-ARR-1", codes)
+        self.assertNotIn("MCO-OPEN-1", codes)
+
+    def test_reception_can_mark_picked_up_only(self):
+        self.client.force_authenticate(self.reception)
+        ok = self.client.patch(
+            reverse("shipment-detail", kwargs={"pk": str(self.arrived.uuid)}),
+            {"status": "out_for_delivery"},
+            format="json",
+        )
+        self.assertEqual(ok.status_code, 200, ok.data)
+        self.arrived.refresh_from_db()
+        self.assertEqual(self.arrived.status, "out_for_delivery")
+
+        denied = self.client.patch(
+            reverse("shipment-detail", kwargs={"pk": str(self.open_batch.uuid)}),
+            {"status": "out_for_delivery"},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        generate = self.client.post(reverse("shipment-generate"), {}, format="json")
+        self.assertEqual(generate.status_code, 403)
+
+        bulk = self.client.post(
+            reverse("shipment-bulk-status"),
+            {"ids": [str(self.arrived.uuid)], "status": "delivered"},
+            format="json",
+        )
+        self.assertEqual(bulk.status_code, 403)
+
+    def test_full_admin_sees_all_batches(self):
+        self.client.force_authenticate(self.full_admin)
+        response = self.client.get(reverse("shipment-list-create"))
+        self.assertEqual(response.status_code, 200, response.data)
+        codes = [b["code"] for b in response.data]
+        self.assertIn("MCO-ARR-1", codes)
+        self.assertIn("MCO-OPEN-1", codes)
