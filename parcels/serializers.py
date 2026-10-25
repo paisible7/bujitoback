@@ -212,6 +212,7 @@ class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
 class ShipmentBatchSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     parcel_count = serializers.SerializerMethodField()
     tracking_numbers = serializers.SerializerMethodField()
+    parcels_summary = serializers.SerializerMethodField()
     admin_photo_url = serializers.SerializerMethodField()
     expedition_label = serializers.SerializerMethodField()
     clients = serializers.SerializerMethodField()
@@ -221,13 +222,14 @@ class ShipmentBatchSerializer(PublicUUIDSerializerMixin, serializers.ModelSerial
         fields = [
             'id', 'code', 'expedition_label', 'status',
             'total_weight_kg', 'total_volume_cbm', 'parcel_count',
-            'tracking_numbers', 'clients', 'created_at', 'shipped_at', 'notes',
+            'tracking_numbers', 'parcels_summary', 'clients',
+            'created_at', 'shipped_at', 'notes',
             'admin_description', 'admin_photo_url',
         ]
         read_only_fields = (
             'code', 'total_weight_kg', 'total_volume_cbm',
             'created_at', 'shipped_at', 'expedition_label', 'admin_photo_url',
-            'clients',
+            'clients', 'parcels_summary',
         )
 
     def get_parcel_count(self, obj):
@@ -235,6 +237,16 @@ class ShipmentBatchSerializer(PublicUUIDSerializerMixin, serializers.ModelSerial
 
     def get_tracking_numbers(self, obj):
         return list(obj.parcels.values_list('tracking_number', flat=True))
+
+    def get_parcels_summary(self, obj):
+        """Tracking + type (description) pour recherche / badges UI."""
+        return [
+            {
+                'tracking_number': p.tracking_number,
+                'description': (p.description or '').strip(),
+            }
+            for p in obj.parcels.all()
+        ]
 
     def get_admin_photo_url(self, obj):
         return absolute_media_url(

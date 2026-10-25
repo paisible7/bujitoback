@@ -193,7 +193,9 @@ class OrderListCreateView(generics.ListCreateAPIView):
         'client_name',
         'client_phone',
         'city',
+        'user__city',
         'parcels__tracking_number',
+        'parcels__description',
     ]
     pagination_class = OptionalPageNumberPagination
 
@@ -456,6 +458,8 @@ class ParcelListCreateView(generics.ListCreateAPIView):
         'warehouse_number',
         'client_name',
         'client_phone',
+        'order__city',
+        'order__user__city',
         'order__user__email',
         'order__user__phone_number',
         'shipment_batches__code',

@@ -227,6 +227,7 @@ class UserListCreateView(generics.ListCreateAPIView):
                 Q(email__icontains=search)
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
+                | Q(city__icontains=search)
             )
         return qs.annotate(
             orders_count=Count('orders', distinct=True),

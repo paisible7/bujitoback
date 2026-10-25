@@ -684,6 +684,7 @@ class AdminClientServiceView(APIView):
                 Q(email__icontains=search)
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
+                | Q(city__icontains=search)
                 | Q(support_followup__note__icontains=search)
             )
         qs = qs.order_by(
@@ -973,6 +974,7 @@ class SupportChatView(APIView):
                 Q(email__icontains=search)
                 | Q(full_name__icontains=search)
                 | Q(phone_number__icontains=search)
+                | Q(city__icontains=search)
                 | Q(support_followup__note__icontains=search)
             )
         qs = qs.order_by(
