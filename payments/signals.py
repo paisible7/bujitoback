@@ -48,19 +48,74 @@ def _payment_post_save(sender, instance: Payment, created: bool, **kwargs):
     # Expédition payée → marquer paid (éligible MCO si Bujito Digital)
     if instance.expedition_id is not None:
         expedition_id = instance.expedition_id
+        payment_pk = instance.pk
+        payment_amount = instance.amount
 
         def mark_expedition() -> None:
             from django.utils import timezone
+            from notifications.utils import notify_admins, send_fcm_notification
             from parcels.models import ExpeditionRequest
 
-            updated = ExpeditionRequest.objects.filter(
-                pk=expedition_id,
-                status="awaiting_payment",
-            ).update(status="paid", paid_at=timezone.now())
-            if not updated:
+            exp = (
+                ExpeditionRequest.objects.select_related("user")
+                .filter(pk=expedition_id, status="awaiting_payment")
+                .first()
+            )
+            if exp is None:
                 logger.info(
                     "Payment %s completed but expedition %s was not awaiting payment.",
-                    instance.pk,
+                    payment_pk,
+                    expedition_id,
+                )
+                return
+            exp.status = "paid"
+            exp.paid_at = timezone.now()
+            exp.save(update_fields=["status", "paid_at"])
+            trackings = ", ".join(
+                exp.parcels.values_list("tracking_number", flat=True)[:5]
+            )
+            carrier = (
+                "autre transitaire"
+                if exp.mode == "other_forwarder"
+                else "Bujito Digital"
+            )
+            try:
+                notify_admins(
+                    "Expédition payée",
+                    f"Paiement #{payment_pk} — expédition #{exp.pk} "
+                    f"({carrier}) : ${payment_amount}. "
+                    f"Client {getattr(exp.user, 'email', '')}. "
+                    f"Colis : {trackings or '—'}.",
+                    type="payment",
+                    reference_id=payment_pk,
+                    data={
+                        "type": "expedition",
+                        "expedition_id": str(exp.pk),
+                        "payment_id": str(payment_pk),
+                        "mode": exp.mode,
+                        "status": "paid",
+                    },
+                )
+                if exp.user_id:
+                    send_fcm_notification(
+                        exp.user,
+                        "Paiement expédition confirmé",
+                        f"Votre paiement de ${payment_amount} pour "
+                        f"l'expédition #{exp.pk} ({carrier}) est confirmé.",
+                        type="payment",
+                        reference_id=payment_pk,
+                        data={
+                            "type": "expedition",
+                            "expedition_id": str(exp.pk),
+                            "payment_id": str(payment_pk),
+                            "mode": exp.mode,
+                            "status": "paid",
+                        },
+                        translate=False,
+                    )
+            except Exception:
+                logger.exception(
+                    "Échec notification après paiement expédition #%s",
                     expedition_id,
                 )
 

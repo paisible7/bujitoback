@@ -1824,7 +1824,30 @@ def _expedition_quote_or_create(request, *, create: bool):
                 },
                 translate=False,
             )
-        elif admin:
+        elif quote['mode'] == 'bujito_digital':
+            trackings = ', '.join(
+                str(t) for t in (quote.get('tracking_numbers') or []) if t
+            )
+            first_tracking = next(
+                (str(t) for t in (quote.get('tracking_numbers') or []) if t),
+                '',
+            )
+            notify_admins(
+                "Expédition Bujito",
+                f"{owner.email} a choisi l'expédition #{exp.pk} "
+                f"({quote.get('transport_mode')}, ${quote['total_due_now']:.2f})"
+                + (f" — {trackings}" if trackings else "")
+                + ".",
+                type="expedition",
+                reference_id=exp.pk,
+                data={
+                    "type": "expedition",
+                    "expedition_id": str(exp.pk),
+                    "mode": "bujito_digital",
+                    "status": exp.status,
+                    "tracking_number": first_tracking or "",
+                },
+            )
             send_fcm_notification(
                 owner,
                 "Expédition à payer",
@@ -1832,17 +1855,14 @@ def _expedition_quote_or_create(request, *, create: bool):
                 f"Réf. expédition #{exp.pk}.",
                 type="payment",
                 reference_id=exp.pk,
-                data={"type": "expedition", "expedition_id": str(exp.pk)},
+                data={
+                    "type": "expedition",
+                    "expedition_id": str(exp.pk),
+                    "mode": "bujito_digital",
+                    "status": exp.status,
+                    "tracking_number": first_tracking or "",
+                },
                 translate=False,
-            )
-        else:
-            notify_admins(
-                "Expédition Bujito",
-                f"{owner.email} a choisi l'expédition #{exp.pk} "
-                f"({quote.get('transport_mode')}, ${quote['total_due_now']:.2f}).",
-                type="expedition",
-                reference_id=exp.pk,
-                data={"type": "expedition", "expedition_id": str(exp.pk)},
             )
     except Exception:
         import logging

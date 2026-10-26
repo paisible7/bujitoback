@@ -60,6 +60,29 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
                 "action": "arrived",
             },
         )
+        try:
+            client_label = (
+                getattr(user, "email", None)
+                or getattr(user, "full_name", None)
+                or str(getattr(user, "pk", ""))
+            )
+            notify_admins(
+                "Colis arrivé à l'entrepôt",
+                f"Colis {tracking} ({client_label}) réceptionné à l'entrepôt.",
+                type="parcel",
+                reference_id=instance.pk,
+                data={
+                    "type": "parcel",
+                    "reference_id": instance.pk,
+                    "action": "arrived",
+                    "tracking_number": tracking,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Échec notification admin arrivée entrepôt colis %s",
+                instance.pk,
+            )
         return
 
     title = "Mise a jour colis"
