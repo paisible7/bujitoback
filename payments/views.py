@@ -45,6 +45,36 @@ DEFAULT_METHOD_NAMES = {
 MOBILE_MONEY_CODES = {"orange_money", "mtn_momo", "wave", "moov"}
 
 
+def _http_status_for_saspay_error(exc: SasPayError) -> int:
+    """Validation / config → 4xx ; panne upstream → 502."""
+    code = (getattr(exc, "code", None) or "").strip().lower()
+    upstream = getattr(exc, "http_status", None)
+    if code in {"validation_error", "not_configured"}:
+        return status.HTTP_400_BAD_REQUEST
+    if isinstance(upstream, int):
+        if upstream in {400, 422}:
+            return status.HTTP_400_BAD_REQUEST
+        if upstream in {401, 403}:
+            return status.HTTP_502_BAD_GATEWAY
+        if 400 <= upstream < 500:
+            return status.HTTP_400_BAD_REQUEST
+        if upstream == 429:
+            return status.HTTP_429_TOO_MANY_REQUESTS
+    if code in {"network_error", "auth_error", "rate_limited", "bad_response"}:
+        return status.HTTP_502_BAD_GATEWAY
+    return status.HTTP_502_BAD_GATEWAY
+
+
+def _saspay_error_response(exc: SasPayError) -> Response:
+    return Response(
+        {
+            "message": str(exc) or "Impossible d'initialiser le paiement SasPay",
+            "code": getattr(exc, "code", None),
+        },
+        status=_http_status_for_saspay_error(exc),
+    )
+
+
 def _format_payment_amount(amount, currency: str | None) -> str:
     """Libellé montant pour notifications (USD / Fc / £ / FCFA — jamais XOF)."""
     code = (currency or "USD").strip().upper()
@@ -635,13 +665,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 payment.save(
                     update_fields=["provider_raw_response", "updated_at"]
                 )
-                return Response(
-                    {
-                        "message": str(exc) or "Impossible d'initialiser le paiement SasPay",
-                        "code": getattr(exc, "code", None),
-                    },
-                    status=status.HTTP_502_BAD_GATEWAY,
-                )
+                return _saspay_error_response(exc)
             message = "Redirection vers la page de paiement sécurisée"
         elif simulate_card:
             raw = payment.provider_raw_response or {}
@@ -692,10 +716,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             try:
                 checkout_url = PaymentService.initiate_payment(payment)
             except SasPayError as exc:
-                return Response(
-                    {"message": str(exc)},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
+                return _saspay_error_response(exc)
             message = "Paiement initialisé"
 
         payment.refresh_from_db()

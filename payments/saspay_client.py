@@ -106,6 +106,9 @@ def _humanize_error_payload(payload: Any) -> tuple[str, str | None]:
         elif isinstance(val, str) and val.strip():
             parts.append(f"{key}: {val.strip()}")
     if parts:
+        # Un seul champ → message seul (« Le montant minimum est de 0.50 USD. »)
+        if len(parts) == 1 and ": " in parts[0]:
+            return parts[0].split(": ", 1)[1], "validation_error"
         return " ; ".join(parts), "validation_error"
     return "Erreur SasPay", None
 

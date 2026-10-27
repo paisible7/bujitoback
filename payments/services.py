@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.conf import settings
@@ -10,6 +11,26 @@ from django.utils import timezone
 from .saspay_client import SasPayClient, SasPayError, saspay_enabled
 
 logger = logging.getLogger(__name__)
+
+# Plancher général SasPay — tous moyens (MM, Wave, carte, crypto).
+SASPAY_MIN_AMOUNT_USD = Decimal("0.50")
+
+
+def _ensure_saspay_amount_ok(payment) -> None:
+    """Évite d'ouvrir une page SasPay déjà vouée à l'échec (min global)."""
+    currency = (payment.currency or "USD").strip().upper()
+    try:
+        amount = Decimal(str(payment.amount))
+    except (InvalidOperation, TypeError, ValueError):
+        return
+    if currency == "USD" and amount < SASPAY_MIN_AMOUNT_USD:
+        raise SasPayError(
+            f"Montant minimum SasPay : {SASPAY_MIN_AMOUNT_USD} USD "
+            f"pour tous les moyens de paiement "
+            f"(montant actuel : {amount} USD).",
+            code="validation_error",
+            http_status=400,
+        )
 
 
 def _merge_provider_meta(payment, patch: dict[str, Any]) -> dict:
@@ -80,6 +101,8 @@ class PaymentService:
                 "Paiement indisponible : configurez SASPAY_API_KEY",
                 code="not_configured",
             )
+
+        _ensure_saspay_amount_ok(payment)
 
         email, name, phone = _customer_from_payment(payment)
         # Ne pas envoyer un téléphone trop court / ambigu (évite 422 SasPay).
