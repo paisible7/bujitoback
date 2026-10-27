@@ -212,9 +212,16 @@ CORS_ALLOW_HEADERS = list(env.list(
 ))
 CORS_EXPOSE_HEADERS = ['content-type', 'content-length']
 
-# Payments
-# Used to verify provider webhooks (HMAC-SHA256 on raw request body).
-PAYMENT_WEBHOOK_SECRET = env('PAYMENT_WEBHOOK_SECRET', default='')
+# Payments — SasPay (https://docs.saspay.me)
+# Clé API secrète : sk_test_… (dev) ou sk_live_… (prod). Jamais côté Flutter.
+SASPAY_API_KEY = env('SASPAY_API_KEY', default='')
+SASPAY_BASE_URL = env('SASPAY_BASE_URL', default='https://api.saspay.me/api/v1').rstrip('/')
+# Secret affiché une seule fois à la création du webhook (dashboard SasPay).
+SASPAY_WEBHOOK_SECRET = env('SASPAY_WEBHOOK_SECRET', default='')
+# Optionnel : ADD_ON | DEDUCTED (sinon réglage marchand SasPay).
+SASPAY_FEE_CHARGE_MODE = env('SASPAY_FEE_CHARGE_MODE', default='')
+# Compat / fallback signature (tests legacy + migration).
+PAYMENT_WEBHOOK_SECRET = env('PAYMENT_WEBHOOK_SECRET', default='') or SASPAY_WEBHOOK_SECRET
 
 # Logs images / media (console)
 LOGGING = {

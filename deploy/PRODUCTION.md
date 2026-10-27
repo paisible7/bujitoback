@@ -97,8 +97,21 @@ CSRF_TRUSTED_ORIGINS=https://apibudig.capslockdev.com
 CORS_ALLOW_ALL_ORIGINS=True
 PUBLIC_BASE_URL=https://apibudig.capslockdev.com
 SERVE_MEDIA=True
-PAYMENT_WEBHOOK_SECRET=<secret>
+
+# SasPay — générer clé + webhook dans app.saspay.me (Développeur / Webhooks)
+SASPAY_API_KEY=sk_live_...
+SASPAY_WEBHOOK_SECRET=<secret-copié-une-seule-fois>
+# URL webhook à enregistrer chez SasPay :
+#   https://apibudig.capslockdev.com/api/payments/webhook/
+# Événements : transaction.success, transaction.failed (+ webhook.test pour tester)
 ```
+
+### Checklist SasPay (après déploiement)
+1. Dashboard SasPay → **Clés API** → générer `sk_live_…` → coller dans `SASPAY_API_KEY`
+2. Dashboard → **Webhooks** → URL `…/api/payments/webhook/` → copier `signing_secret` → `SASPAY_WEBHOOK_SECRET`
+3. Redémarrer Gunicorn / service backend
+4. Déclencher **webhook.test** depuis SasPay ; vérifier HTTP 200
+5. Faire un petit paiement test (commande/expédition) → page `pay.saspay.me` → confirmer
 
 ### Images `/media/` qui 404 (Flutter : « Invalid encoded image data »)
 

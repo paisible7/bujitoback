@@ -1,10 +1,9 @@
-import hmac
-import hashlib
+import re
 import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-from django.conf import settings
 from django.db import transaction
+from django.http import HttpResponse
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
@@ -23,6 +22,8 @@ from .serializers import (
     SavedPaymentMethodSerializer,
 )
 from .services import PaymentService
+from .saspay_client import SasPayError, saspay_enabled
+from .webhook_security import verify_incoming_webhook
 
 
 # Moyens affichés au checkout client (Mobile Money, Wave, carte).
@@ -141,32 +142,53 @@ def _mock_ussd_code(method_code: str, phone_number: str) -> str:
     return f"{prefix}{digits}#"
 
 
-def _verify_webhook_signature(request) -> bool:
-    """
-    Generic HMAC-SHA256 verification.
-    Provider-specific signature rules may differ, but this gives a safe baseline.
-    """
-    secret = getattr(settings, "PAYMENT_WEBHOOK_SECRET", "") or ""
-    secret = secret.strip()
-    if not secret:
-        # Autorisé uniquement en développement. En production, un webhook
-        # non signé ne doit jamais pouvoir confirmer un paiement.
-        return bool(settings.DEBUG)
+def _payment_service_amount(payment) -> Decimal | None:
+    """Montant service (hors frais) pour comparer au devis / total_due_now."""
+    meta = payment.provider_raw_response if isinstance(payment.provider_raw_response, dict) else {}
+    raw = meta.get("service_amount")
+    if raw is not None and raw != "":
+        try:
+            return Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+    return payment.amount
 
-    sig = (
-        request.headers.get("X-Payment-Signature")
-        or request.headers.get("X-Signature")
-        or request.headers.get("X-Hub-Signature-256")
-        or ""
-    ).strip()
-    if not sig:
-        return False
 
-    if sig.startswith("sha256="):
-        sig = sig[len("sha256=") :]
+_BUJITO_REF_RE = re.compile(r"\b((?:PAY|EXP|TRF)-[A-Z0-9]+)\b", re.I)
 
-    mac = hmac.new(secret.encode("utf-8"), msg=request.body or b"", digestmod=hashlib.sha256).hexdigest()
-    return hmac.compare_digest(mac, sig)
+
+def _find_payment_for_saspay_webhook(data: dict) -> Payment | None:
+    """Résout un Payment via metadata Bujito, description, ou external_id."""
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    candidates = [
+        (meta.get("bujito_reference") or "").strip(),
+        (data.get("bujito_reference") or "").strip(),
+        (data.get("external_reference") or "").strip(),
+    ]
+    for ref in candidates:
+        if not ref:
+            continue
+        payment = Payment.objects.filter(reference=ref).first()
+        if payment:
+            return payment
+
+    # Description checkout : "Commande Bujito PAY-XXXX"
+    for text in (
+        str(data.get("description") or ""),
+        str(meta.get("description") or ""),
+    ):
+        match = _BUJITO_REF_RE.search(text)
+        if match:
+            payment = Payment.objects.filter(reference=match.group(1).upper()).first()
+            if payment:
+                return payment
+
+    tx_id = str(data.get("id") or "").strip()
+    if tx_id:
+        payment = Payment.objects.filter(external_id=tx_id).first()
+        if payment:
+            return payment
+    return None
 
 
 class SavedPaymentMethodViewSet(UUIDLookupMixin, viewsets.ModelViewSet):
@@ -415,7 +437,13 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 {"type": "order", "order_id": order.pk},
             )
 
-        if method_code in {"orange_money", "mtn_momo", "wave", "moov"} and not phone_number:
+        live_saspay = saspay_enabled() and not is_transfer
+
+        if (
+            method_code in {"orange_money", "mtn_momo", "wave", "moov"}
+            and not phone_number
+            and not live_saspay
+        ):
             if saved_method_id:
                 try:
                     saved = resolve_uuid_or_pk(
@@ -428,9 +456,11 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             if not phone_number:
                 return Response({"message": "phone_number is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Simulation carte uniquement en DEV sans SasPay (tests / local).
         simulate_card = (
             method_code == "card"
             and not is_transfer
+            and not live_saspay
             and (order is not None or expedition is not None)
         )
 
@@ -527,56 +557,11 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 )
 
         ussd_code = None
-        if simulate_card:
-            raw = payment.provider_raw_response or {}
-            if not isinstance(raw, dict):
-                raw = {"previous": raw}
-            raw.update({"simulated": True, "method": "card"})
-            payment.status = "completed"
-            payment.payment_url = None
-            payment.provider_raw_response = raw
-            payment.save(
-                update_fields=[
-                    "method",
-                    "phone_number",
-                    "amount",
-                    "status",
-                    "payment_url",
-                    "provider_raw_response",
-                    "updated_at",
-                ]
-            )
-            checkout_url = None
-            message = "Paiement confirmé"
-        elif method_code in MOBILE_MONEY_CODES and not is_transfer:
-            # Pas de lien externe : flux in-app (USSD simulé) pour Mobile Money / Wave.
-            ussd_code = _mock_ussd_code(method_code, phone_number)
-            raw = payment.provider_raw_response or {}
-            if not isinstance(raw, dict):
-                raw = {"previous": raw}
-            raw.update(
-                {
-                    "simulated": True,
-                    "method": method_code,
-                    "ussd_code": ussd_code,
-                }
-            )
-            payment.payment_url = None
-            payment.provider_raw_response = raw
-            payment.save(
-                update_fields=[
-                    "method",
-                    "phone_number",
-                    "payment_url",
-                    "provider_raw_response",
-                    "updated_at",
-                ]
-            )
-            checkout_url = None
-            message = "Composez le code USSD pour confirmer le paiement"
-        elif is_transfer:
+        checkout_url = None
+        message = "Paiement initialisé"
+
+        if is_transfer:
             # Transfert d'argent = service à part : reste en attente jusqu'à confirmation admin.
-            checkout_url = None
             message = "Transfert initié — en attente de confirmation"
             try:
                 from notifications.utils import notify_admins, send_fcm_notification
@@ -606,8 +591,82 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 )
             except Exception:
                 pass
+        elif live_saspay:
+            try:
+                checkout_url = PaymentService.initiate_payment(payment)
+            except SasPayError as exc:
+                payment.status = "failed"
+                raw = payment.provider_raw_response if isinstance(payment.provider_raw_response, dict) else {}
+                raw = dict(raw)
+                raw.update(
+                    {
+                        "provider": "saspay",
+                        "saspay_error": str(exc),
+                        "saspay_error_code": getattr(exc, "code", None),
+                    }
+                )
+                payment.provider_raw_response = raw
+                payment.save(
+                    update_fields=["status", "provider_raw_response", "updated_at"]
+                )
+                return Response(
+                    {"message": str(exc) or "Impossible d'initialiser le paiement SasPay"},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            message = "Redirection vers la page de paiement sécurisée"
+        elif simulate_card:
+            raw = payment.provider_raw_response or {}
+            if not isinstance(raw, dict):
+                raw = {"previous": raw}
+            raw.update({"simulated": True, "method": "card"})
+            payment.status = "completed"
+            payment.payment_url = None
+            payment.provider_raw_response = raw
+            payment.save(
+                update_fields=[
+                    "method",
+                    "phone_number",
+                    "amount",
+                    "status",
+                    "payment_url",
+                    "provider_raw_response",
+                    "updated_at",
+                ]
+            )
+            message = "Paiement confirmé"
+        elif method_code in MOBILE_MONEY_CODES:
+            # DEV sans SasPay : USSD simulé (tests / local).
+            ussd_code = _mock_ussd_code(method_code, phone_number)
+            raw = payment.provider_raw_response or {}
+            if not isinstance(raw, dict):
+                raw = {"previous": raw}
+            raw.update(
+                {
+                    "simulated": True,
+                    "method": method_code,
+                    "ussd_code": ussd_code,
+                }
+            )
+            payment.payment_url = None
+            payment.provider_raw_response = raw
+            payment.save(
+                update_fields=[
+                    "method",
+                    "phone_number",
+                    "payment_url",
+                    "provider_raw_response",
+                    "updated_at",
+                ]
+            )
+            message = "Composez le code USSD pour confirmer le paiement"
         else:
-            checkout_url = PaymentService.initiate_payment(payment)
+            try:
+                checkout_url = PaymentService.initiate_payment(payment)
+            except SasPayError as exc:
+                return Response(
+                    {"message": str(exc)},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             message = "Paiement initialisé"
 
         payment.refresh_from_db()
@@ -615,7 +674,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         return Response(
             {
                 "transaction": tx,
-                "redirect_url": checkout_url,
+                "redirect_url": checkout_url or payment.payment_url,
                 "ussd_code": ussd_code,
                 "message": message,
             },
@@ -664,6 +723,14 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         except Payment.DoesNotExist:
             return Response({"message": "Paiement non trouvé"}, status=status.HTTP_404_NOT_FOUND)
 
+        # Filet de sécurité si le webhook SasPay est en retard / manquant.
+        if payment.status == "pending" and saspay_enabled():
+            try:
+                PaymentService.verify_payment_status(payment)
+                payment.refresh_from_db()
+            except Exception:
+                pass
+
         return Response(
             {
                 "transaction": self._serialize_payment(payment, request),
@@ -671,6 +738,25 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=["get"], url_path="return", permission_classes=[permissions.AllowAny])
+    def payment_return(self, request):
+        """Page HTML après redirection SasPay (return_url) — la confirmation passe par webhook/verify."""
+        ref = (request.query_params.get("ref") or "").strip()
+        html = f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Paiement Bujito</title>
+<style>
+body{{font-family:system-ui,sans-serif;background:#0b0b0f;color:#f5f5f5;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:24px}}
+.card{{max-width:420px;background:#16161d;border:1px solid #2a2a35;border-radius:16px;padding:28px;text-align:center}}
+h1{{font-size:1.25rem;margin:0 0 12px}} p{{color:#a1a1aa;line-height:1.5;margin:0}}
+code{{color:#facc15}}
+</style></head><body><div class="card">
+<h1>Paiement en cours de confirmation</h1>
+<p>Vous pouvez revenir dans l'application Bujito Digital.
+{"Référence : <code>" + ref + "</code>" if ref else ""}</p>
+</div></body></html>"""
+        return HttpResponse(html, content_type="text/html; charset=utf-8")
 
     @action(detail=False, methods=["get"])
     def history(self, request):
@@ -741,19 +827,20 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Paiement commande : contrôles métier uniquement à la confirmation
+        # Paiement commande : comparer au montant service (hors frais gateway).
         if (
             new_status == "completed"
             and payment.order_id is not None
         ):
             order = payment.order
+            service_amount = _payment_service_amount(payment)
             try:
                 amounts_match = (
                     order is not None
                     and order.quote_ready
                     and order.total_amount is not None
                     and order.total_amount > 0
-                    and payment.amount == order.total_amount
+                    and service_amount == order.total_amount
                 )
             except Exception:
                 amounts_match = False
@@ -770,13 +857,14 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
 
         if new_status == "completed" and payment.expedition_id is not None:
             expedition = payment.expedition
+            service_amount = _payment_service_amount(payment)
             try:
                 amounts_match = (
                     expedition is not None
                     and expedition.status == "awaiting_payment"
                     and expedition.total_due_now is not None
                     and expedition.total_due_now > 0
-                    and payment.amount == expedition.total_due_now
+                    and service_amount == expedition.total_due_now
                 )
             except Exception:
                 amounts_match = False
@@ -837,45 +925,81 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["post"], permission_classes=[permissions.AllowAny])
     @method_decorator(csrf_exempt)
     def webhook(self, request):
-        if not _verify_webhook_signature(request):
+        if not verify_incoming_webhook(request):
             return Response({"message": "Invalid signature"}, status=status.HTTP_401_UNAUTHORIZED)
 
-        data = request.data
+        payload = request.data if isinstance(request.data, dict) else {}
+        event = (
+            (request.headers.get("X-Webhook-Event") or "").strip()
+            or (payload.get("event") or "").strip()
+        )
 
-        reference = (data.get("external_id") or data.get("ref_command") or data.get("reference") or "").strip()
-        status_received = (data.get("status") or "").strip().lower()
+        # Ping de test SasPay (dashboard) — ack sans traiter un paiement.
+        if event == "webhook.test" or payload.get("event") == "webhook.test":
+            return Response({"status": "received", "event": "webhook.test"}, status=status.HTTP_200_OK)
 
-        if not reference:
-            return Response({"message": "Missing reference"}, status=status.HTTP_400_BAD_REQUEST)
+        # Enveloppe SasPay : {"event": "...", "data": {...}}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        if not isinstance(data, dict):
+            data = {}
 
         with transaction.atomic():
-            try:
-                payment = Payment.objects.select_for_update().get(
-                    reference=reference,
+            payment = _find_payment_for_saspay_webhook(data)
+            if payment is None:
+                # Compat ancien format plat {reference, status}
+                reference = (
+                    data.get("external_id")
+                    or data.get("ref_command")
+                    or data.get("reference")
+                    or payload.get("reference")
+                    or ""
                 )
-            except Payment.DoesNotExist:
+                reference = str(reference).strip()
+                if reference:
+                    payment = Payment.objects.filter(reference=reference).first()
+
+            if payment is None:
+                # 200 pour éviter les retries infinis sur events hors scope Bujito.
                 return Response(
-                    {"message": "Paiement non trouvé"},
-                    status=status.HTTP_404_NOT_FOUND,
+                    {"status": "ignored", "reason": "payment_not_found"},
+                    status=status.HTTP_200_OK,
                 )
 
-            # Map provider status to internal status.
-            new_status = None
-            if status_received in {"success", "completed", "paid"}:
-                new_status = "completed"
-            elif status_received in {"failed", "error"}:
-                new_status = "failed"
-            elif status_received in {"cancelled", "canceled"}:
-                new_status = "cancelled"
+            payment = Payment.objects.select_for_update().get(pk=payment.pk)
 
-            if new_status and payment.status != new_status:
-                payment.status = new_status
-                payment.updated_at = timezone.now()
-
-            payment.provider_raw_response = data
-            payment.save(
-                update_fields=["status", "provider_raw_response", "updated_at"],
-            )
+            if event.startswith("transaction.") or data.get("status") in {
+                "SUCCESS",
+                "FAILED",
+                "CANCELLED",
+                "CANCELED",
+            }:
+                PaymentService.apply_saspay_webhook_event(payment, event, data)
+            else:
+                # Ancien format : status en minuscules
+                status_received = str(
+                    data.get("status") or payload.get("status") or ""
+                ).strip().lower()
+                new_status = None
+                if status_received in {"success", "completed", "paid"}:
+                    new_status = "completed"
+                elif status_received in {"failed", "error"}:
+                    new_status = "failed"
+                elif status_received in {"cancelled", "canceled"}:
+                    new_status = "cancelled"
+                if new_status and payment.status != new_status:
+                    payment.status = new_status
+                    payment.updated_at = timezone.now()
+                    # Fusionner sans écraser service_amount / frais.
+                    raw = (
+                        dict(payment.provider_raw_response)
+                        if isinstance(payment.provider_raw_response, dict)
+                        else {}
+                    )
+                    raw["legacy_webhook"] = payload
+                    payment.provider_raw_response = raw
+                    payment.save(
+                        update_fields=["status", "provider_raw_response", "updated_at"]
+                    )
 
         return Response({"status": "received"}, status=status.HTTP_200_OK)
 
