@@ -65,8 +65,11 @@ def amount_to_decimal_string(amount) -> str:
 
 def resolve_country_and_currency(currency: str | None) -> tuple[str, str]:
     """
-    Map devise Bujito → (country ISO / code SasPay, currency ISO).
-    XC = RDC (USD) dans le catalogue SasPay ; CD = RDC en CDF.
+    Map devise Bujito → (country ISO2 SasPay, currency ISO).
+    RDC = CD (Airtel/Orange/Vodacom). Les paiements USD restent en USD ;
+    SasPay convertit si le réseau exige une autre devise.
+    Pour carte internationale seule, XX est aussi accepté — on privilégie CD
+    pour afficher les MM congolais sur le checkout hébergé.
     """
     code = (currency or "USD").strip().upper()
     if code in {"FC", "CDF"}:
@@ -77,32 +80,51 @@ def resolve_country_and_currency(currency: str | None) -> tuple[str, str]:
         return "CN", "CNY"
     if code == "GBP":
         return "GB", "GBP"
-    # Commandes / expéditions Bujito en USD → wallet RDC (USD)
-    return "XC", "USD"
+    # USD (commandes / expéditions) → pays RDC
+    return "CD", "USD"
+
+
+def _humanize_error_payload(payload: Any) -> tuple[str, str | None]:
+    """Extrait un message lisible + code depuis une réponse d'erreur SasPay."""
+    if not isinstance(payload, dict):
+        return "Erreur SasPay", None
+    err = payload.get("error")
+    if isinstance(err, dict) and err.get("message"):
+        return str(err["message"]), (str(err["code"]) if err.get("code") else None)
+    if isinstance(payload.get("message"), str) and payload["message"].strip():
+        return payload["message"].strip(), None
+    # Validation style {champ: ["…"]} ou error: {champ: ["…"]}
+    source = err if isinstance(err, dict) else payload
+    parts: list[str] = []
+    for key, val in source.items():
+        if key in {"success", "code", "data", "error", "detail"}:
+            if key == "detail" and isinstance(val, str) and val.strip():
+                return val.strip(), None
+            continue
+        if isinstance(val, list) and val:
+            parts.append(f"{key}: {', '.join(str(v) for v in val)}")
+        elif isinstance(val, str) and val.strip():
+            parts.append(f"{key}: {val.strip()}")
+    if parts:
+        return " ; ".join(parts), "validation_error"
+    return "Erreur SasPay", None
 
 
 def _unwrap(payload: Any) -> dict:
     if not isinstance(payload, dict):
         return {}
     if payload.get("success") is False:
-        err = payload.get("error") or {}
-        if isinstance(err, dict) and "message" in err:
-            raise SasPayError(
-                str(err.get("message") or "Erreur SasPay"),
-                http_status=payload.get("code"),
-                code=str(err.get("code") or "") or None,
-                payload=payload,
-            )
-        # Erreurs de validation {champ: [msg]}
+        message, code = _humanize_error_payload(payload)
         raise SasPayError(
-            "Requête SasPay invalide",
-            http_status=payload.get("code") or 400,
-            code="validation_error",
+            message,
+            http_status=payload.get("code"),
+            code=code,
             payload=payload,
         )
     data = payload.get("data")
     if isinstance(data, dict):
         return data
+    # Certaines routes renvoient l'objet directement (sans enveloppe).
     return payload
 
 
@@ -167,23 +189,34 @@ class SasPayClient:
                 payload=payload,
             )
         if response.status_code >= 400:
-            message = "Erreur SasPay"
-            code = None
-            if isinstance(payload, dict):
-                err = payload.get("error")
-                if isinstance(err, dict):
-                    message = str(err.get("message") or message)
-                    code = err.get("code")
-                elif payload.get("message"):
-                    message = str(payload["message"])
+            message, code = _humanize_error_payload(payload)
+            logger.warning(
+                "SasPay HTTP %s on %s %s: %s",
+                response.status_code,
+                method,
+                path,
+                message,
+            )
             raise SasPayError(
                 message,
                 http_status=response.status_code,
-                code=str(code) if code else None,
+                code=code,
                 payload=payload,
             )
 
-        return _unwrap(payload)
+        # Succès (200/201…) — enveloppe {success,data} ou objet brut.
+        try:
+            return _unwrap(payload)
+        except SasPayError:
+            raise
+        except Exception as exc:
+            logger.warning("SasPay unwrap failed on %s %s: %s", method, path, type(exc).__name__)
+            raise SasPayError(
+                "Réponse SasPay illisible",
+                http_status=response.status_code,
+                code="bad_response",
+                payload=payload if isinstance(payload, dict) else None,
+            ) from exc
 
     def create_checkout_session(
         self,

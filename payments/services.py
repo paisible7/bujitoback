@@ -82,6 +82,9 @@ class PaymentService:
             )
 
         email, name, phone = _customer_from_payment(payment)
+        # Ne pas envoyer un téléphone trop court / ambigu (évite 422 SasPay).
+        if phone and len("".join(ch for ch in phone if ch.isdigit())) < 8:
+            phone = None
         description = f"Bujito {payment.reference}"
         if payment.order_id:
             description = f"Commande Bujito {payment.reference}"
@@ -91,7 +94,7 @@ class PaymentService:
         metadata = {
             "bujito_reference": payment.reference,
             "payment_uuid": str(getattr(payment, "uuid", "") or payment.pk),
-            "method": getattr(payment.method, "code", None),
+            "method": getattr(payment.method, "code", None) or "",
         }
         if payment.order_id:
             metadata["order_id"] = str(payment.order_id)
@@ -110,7 +113,13 @@ class PaymentService:
                 return_url=_return_url(payment),
                 metadata=metadata,
             )
-        except SasPayError:
+        except SasPayError as exc:
+            logger.warning(
+                "SasPay initiate failed for %s: %s | payload=%s",
+                payment.reference,
+                exc,
+                getattr(exc, "payload", None),
+            )
             raise
         except Exception as exc:
             logger.exception("SasPay initiate unexpected error for %s", payment.reference)

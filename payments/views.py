@@ -464,6 +464,16 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             and (order is not None or expedition is not None)
         )
 
+        def _reuse_pending(pending: Payment) -> bool:
+            """Réutiliser un pending : simu carte, ou retry SasPay (pas encore de checkout_url)."""
+            if simulate_card:
+                return True
+            if not live_saspay:
+                return False
+            if pending.payment_url:
+                return False
+            return True
+
         with transaction.atomic():
             if order is not None:
                 order = Order.objects.select_for_update().get(pk=order.pk)
@@ -478,7 +488,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     .first()
                 )
                 if pending_payment is not None:
-                    if not simulate_card:
+                    if not _reuse_pending(pending_payment):
                         return Response(
                             {
                                 "message": "Un paiement est déjà en attente pour cette commande.",
@@ -490,7 +500,15 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment.phone_number = phone_number or payment.phone_number
                     payment.amount = amount
                     if meta:
-                        payment.provider_raw_response = meta
+                        # Conserver les clés saspay_* utiles, écraser le meta métier.
+                        prev = (
+                            payment.provider_raw_response
+                            if isinstance(payment.provider_raw_response, dict)
+                            else {}
+                        )
+                        merged = dict(prev)
+                        merged.update(meta)
+                        payment.provider_raw_response = merged
                 else:
                     payment = Payment.objects.create(
                         user=request.user,
@@ -516,7 +534,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     .first()
                 )
                 if pending_payment is not None:
-                    if not simulate_card:
+                    if not _reuse_pending(pending_payment):
                         return Response(
                             {
                                 "message": "Un paiement est déjà en attente pour cette expédition.",
@@ -528,7 +546,14 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment.phone_number = phone_number or payment.phone_number
                     payment.amount = amount
                     if meta:
-                        payment.provider_raw_response = meta
+                        prev = (
+                            payment.provider_raw_response
+                            if isinstance(payment.provider_raw_response, dict)
+                            else {}
+                        )
+                        merged = dict(prev)
+                        merged.update(meta)
+                        payment.provider_raw_response = merged
                 else:
                     payment = Payment.objects.create(
                         user=request.user,
@@ -595,7 +620,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             try:
                 checkout_url = PaymentService.initiate_payment(payment)
             except SasPayError as exc:
-                payment.status = "failed"
+                # Garder pending pour permettre un nouvel essai (ne pas bloquer la commande).
                 raw = payment.provider_raw_response if isinstance(payment.provider_raw_response, dict) else {}
                 raw = dict(raw)
                 raw.update(
@@ -603,14 +628,18 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                         "provider": "saspay",
                         "saspay_error": str(exc),
                         "saspay_error_code": getattr(exc, "code", None),
+                        "saspay_error_payload": getattr(exc, "payload", None),
                     }
                 )
                 payment.provider_raw_response = raw
                 payment.save(
-                    update_fields=["status", "provider_raw_response", "updated_at"]
+                    update_fields=["provider_raw_response", "updated_at"]
                 )
                 return Response(
-                    {"message": str(exc) or "Impossible d'initialiser le paiement SasPay"},
+                    {
+                        "message": str(exc) or "Impossible d'initialiser le paiement SasPay",
+                        "code": getattr(exc, "code", None),
+                    },
                     status=status.HTTP_502_BAD_GATEWAY,
                 )
             message = "Redirection vers la page de paiement sécurisée"

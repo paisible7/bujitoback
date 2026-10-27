@@ -23,8 +23,8 @@ class SasPayHelpersTests(TestCase):
         self.assertEqual(amount_to_decimal_string("14"), "14.00")
         self.assertEqual(amount_to_decimal_string(Decimal("22.5")), "22.50")
 
-    def test_rdc_usd_maps_to_xc(self):
-        self.assertEqual(resolve_country_and_currency("USD"), ("XC", "USD"))
+    def test_rdc_usd_maps_to_cd(self):
+        self.assertEqual(resolve_country_and_currency("USD"), ("CD", "USD"))
         self.assertEqual(resolve_country_and_currency("CDF"), ("CD", "CDF"))
 
 
