@@ -63,16 +63,18 @@ def shipping_cost(
         detail = f"{pieces} × forfait ordinateur à {rates['computer_flat_fee']} $/pièce"
     elif cat in {"electronics_battery", "electronics", "battery"}:
         cat = "electronics_battery"
-        amount = rates["electronics_battery_flat_fee"]
+        rate = rates["electronics_battery_flat_fee"]
+        amount = (billable * rate).quantize(Decimal("0.01"))
         days = rates["phone_days"]
         available = True
-        detail = "forfait électronique avec batterie"
+        detail = f"{billable} kg × {rate} $/kg (électronique avec batterie)"
     elif cat in {"fragile_extra", "fragile", "extras_fragiles"}:
         cat = "fragile_extra"
-        amount = rates["fragile_extra_flat_fee"]
+        rate = rates["fragile_extra_flat_fee"]
+        amount = (billable * rate).quantize(Decimal("0.01"))
         days = rates["phone_days"]
         available = True
-        detail = "forfait extras fragiles"
+        detail = f"{billable} kg × {rate} $/kg (extras fragiles)"
     elif cat == "express":
         available = bool(cfg.express_available)
         days = rates["express_days"]

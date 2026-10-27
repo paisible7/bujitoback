@@ -278,16 +278,16 @@ class ParcelProvisioningTests(TestCase):
             full_name="Client Test",
             phone_number="+243810001234",
         )
-        self.signal_notification = patch(
+        self._patch_notification = patch(
             "parcels.signals.send_fcm_notification",
         )
-        self.signal_admin_notification = patch(
+        self._patch_admin_notification = patch(
             "parcels.signals.notify_admins",
         )
-        self.signal_notification.start()
-        self.signal_admin_notification.start()
-        self.addCleanup(self.signal_notification.stop)
-        self.addCleanup(self.signal_admin_notification.stop)
+        self.signal_notification = self._patch_notification.start()
+        self.signal_admin_notification = self._patch_admin_notification.start()
+        self.addCleanup(self._patch_notification.stop)
+        self.addCleanup(self._patch_admin_notification.stop)
 
     def test_provisioning_is_idempotent(self):
         order = Order.objects.create(
@@ -317,6 +317,58 @@ class ParcelProvisioningTests(TestCase):
         )
         order.refresh_from_db()
         self.assertEqual(order.status, "processing")
+
+    def test_warehouse_arrival_notifies_client_and_admins(self):
+        from .models import Parcel
+
+        order = Order.objects.create(
+            user=self.user,
+            status="processing",
+            quote_ready=True,
+            total_amount=Decimal("10.00"),
+            expected_parcel_count=1,
+        )
+        parcel = Parcel.objects.create(
+            order=order,
+            tracking_number="BUJ-ARRIVE-1",
+            status="awaiting_arrival",
+        )
+        self.signal_notification.reset_mock()
+        self.signal_admin_notification.reset_mock()
+        parcel.status = "pending"
+        parcel.save()
+
+        self.signal_notification.assert_called()
+        client_call = self.signal_notification.call_args
+        self.assertEqual(client_call.args[0], self.user)
+        self.assertIn("entrepôt", client_call.args[1])
+        self.signal_admin_notification.assert_called()
+        admin_call = self.signal_admin_notification.call_args
+        self.assertIn("entrepôt", admin_call.args[0])
+
+    def test_warehouse_arrival_notifies_via_phone_without_order(self):
+        from .models import Parcel
+
+        client = CustomUser.objects.create_user(
+            email="arrive-phone@example.com",
+            password="test-password",
+            phone_number="+243900000099",
+        )
+        parcel = Parcel.objects.create(
+            tracking_number="BUJ-ARRIVE-PHONE",
+            status="awaiting_arrival",
+            client_phone="+243900000099",
+            client_name="Phone Client",
+        )
+        self.signal_notification.reset_mock()
+        self.signal_admin_notification.reset_mock()
+        parcel.status = "pending"
+        parcel.save()
+
+        self.signal_notification.assert_called()
+        self.assertEqual(self.signal_notification.call_args.args[0], client)
+        self.assertIn("entrepôt", self.signal_notification.call_args.args[1])
+        self.signal_admin_notification.assert_called()
 
     def test_generated_parcels_become_groupable_after_arrival(self):
         order = Order.objects.create(

@@ -33,6 +33,29 @@ def user_owns_parcel(user, parcel) -> bool:
     return False
 
 
+def resolve_parcel_owner(parcel):
+    """Retrouve le client propriétaire (commande, groupage ou téléphone)."""
+    from users.models import CustomUser
+
+    order = getattr(parcel, "order", None)
+    if parcel.order_id and order is not None and order.user_id:
+        return order.user
+    cons = parcel.consolidations.order_by("-request_date").first()
+    if cons is not None and cons.user_id:
+        return cons.user
+    phone = _digits(getattr(parcel, "client_phone", None))
+    if phone and len(phone) >= 8:
+        tail = phone[-9:] if len(phone) > 9 else phone
+        match = (
+            CustomUser.objects.filter(phone_number__icontains=tail)
+            .order_by("id")
+            .first()
+        )
+        if match is not None:
+            return match
+    return None
+
+
 def parcels_for_user_q(user):
     """Filtre ORM pour les colis visibles / actionnables par un client."""
     from django.db.models import Q

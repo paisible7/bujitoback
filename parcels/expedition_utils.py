@@ -267,8 +267,6 @@ def build_expedition_quote(
             if weight <= 0 and category not in {
                 "phone",
                 "computer",
-                "electronics_battery",
-                "fragile_extra",
             }:
                 raise ValueError(
                     "Poids du colis manquant : impossible de calculer le tarif avion."

@@ -25,15 +25,69 @@ def _parcel_pre_save(sender, instance: Parcel, **kwargs):
         instance._old_status = None
 
 
+def _notify_warehouse_arrival(parcel: Parcel, *, user=None) -> None:
+    """Notifie client (si connu) + admins de l'arrivée entrepôt."""
+    from .ownership import resolve_parcel_owner
+
+    tracking = parcel.tracking_number or str(parcel.pk)
+    owner = user or resolve_parcel_owner(parcel)
+    client_label = (
+        (getattr(owner, "email", None) if owner is not None else None)
+        or (getattr(owner, "full_name", None) if owner is not None else None)
+        or (parcel.client_name or "").strip()
+        or (parcel.client_phone or "").strip()
+        or "—"
+    )
+    if owner is not None:
+        try:
+            send_fcm_notification(
+                owner,
+                "Colis arrivé à l'entrepôt",
+                (
+                    f"Votre colis {tracking} a été réceptionné à l'entrepôt "
+                    "et peut maintenant être groupé."
+                ),
+                type="parcel",
+                reference_id=parcel.pk,
+                data={
+                    "type": "parcel",
+                    "reference_id": str(parcel.pk),
+                    "action": "arrived",
+                    "tracking_number": tracking,
+                },
+                translate=False,
+            )
+        except Exception:
+            logger.exception(
+                "Échec notification client arrivée entrepôt colis %s",
+                parcel.pk,
+            )
+    try:
+        notify_admins(
+            "Colis arrivé à l'entrepôt",
+            f"Colis {tracking} ({client_label}) réceptionné à l'entrepôt.",
+            type="parcel",
+            reference_id=parcel.pk,
+            data={
+                "type": "parcel",
+                "reference_id": str(parcel.pk),
+                "action": "arrived",
+                "tracking_number": tracking,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Échec notification admin arrivée entrepôt colis %s",
+            parcel.pk,
+        )
+
+
 @receiver(post_save, sender=Parcel)
 def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
+    from .ownership import resolve_parcel_owner
+
     if instance.order_id:
         sync_order_status_by_id(instance.order_id)
-
-    order = instance.order
-    user = getattr(order, "user", None)
-    if user is None:
-        return
 
     old_status = getattr(instance, "_old_status", None)
     if not created and old_status == instance.status:
@@ -44,45 +98,17 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
         # Le service de provisionnement envoie une notification récapitulative
         # avec tous les numéros de la commande.
         return
-    if old_status == "awaiting_arrival" and instance.status == "pending":
-        send_fcm_notification(
-            user,
-            "Colis arrivé à l'entrepôt",
-            (
-                f"Votre colis {tracking} a été réceptionné à l'entrepôt "
-                "et peut maintenant être groupé."
-            ),
-            type="parcel",
-            reference_id=instance.pk,
-            data={
-                "type": "parcel",
-                "reference_id": instance.pk,
-                "action": "arrived",
-            },
-        )
-        try:
-            client_label = (
-                getattr(user, "email", None)
-                or getattr(user, "full_name", None)
-                or str(getattr(user, "pk", ""))
-            )
-            notify_admins(
-                "Colis arrivé à l'entrepôt",
-                f"Colis {tracking} ({client_label}) réceptionné à l'entrepôt.",
-                type="parcel",
-                reference_id=instance.pk,
-                data={
-                    "type": "parcel",
-                    "reference_id": instance.pk,
-                    "action": "arrived",
-                    "tracking_number": tracking,
-                },
-            )
-        except Exception:
-            logger.exception(
-                "Échec notification admin arrivée entrepôt colis %s",
-                instance.pk,
-            )
+
+    # Arrivée dépôt : transition attendue, ou création déjà « arrivé ».
+    is_arrival = (
+        old_status == "awaiting_arrival" and instance.status == "pending"
+    ) or (created and instance.status == "pending")
+    if is_arrival:
+        _notify_warehouse_arrival(instance)
+        return
+
+    user = resolve_parcel_owner(instance)
+    if user is None:
         return
 
     title = "Mise a jour colis"
@@ -93,7 +119,12 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
         body,
         type="parcel",
         reference_id=instance.pk,
-        data={"type": "parcel", "reference_id": instance.pk},
+        data={
+            "type": "parcel",
+            "reference_id": str(instance.pk),
+            "tracking_number": tracking,
+        },
+        translate=False,
     )
 
 

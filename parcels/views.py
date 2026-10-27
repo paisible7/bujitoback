@@ -1556,22 +1556,9 @@ def _eligible_mco_parcels():
 
 
 def _resolve_parcel_owner(parcel):
-    if parcel.order_id and parcel.order and parcel.order.user_id:
-        return parcel.order.user
-    cons = parcel.consolidations.order_by('-request_date').first()
-    if cons and cons.user_id:
-        return cons.user
-    phone = "".join(ch for ch in (parcel.client_phone or "") if ch.isdigit())
-    if phone and len(phone) >= 8:
-        tail = phone[-9:] if len(phone) > 9 else phone
-        match = (
-            CustomUser.objects.filter(phone_number__icontains=tail)
-            .order_by('id')
-            .first()
-        )
-        if match is not None:
-            return match
-    return None
+    from .ownership import resolve_parcel_owner
+
+    return resolve_parcel_owner(parcel)
 
 
 def _expedition_quote_or_create(request, *, create: bool):

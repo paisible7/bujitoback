@@ -45,6 +45,25 @@ class ShippingCostTests(TestCase):
         self.assertEqual(result["days"], None)
         self.assertIn("3 × forfait ordinateur", result["detail"])
 
+    def test_electronics_battery_per_kg(self):
+        result = shipping_cost(
+            category="electronics_battery",
+            weight_kg="14",
+            settings=self.cfg,
+        )
+        self.assertEqual(result["billable_kg"], 14.0)
+        self.assertEqual(result["amount_usd"], 308.0)  # 14 × 22
+        self.assertIn("$/kg", result["detail"])
+
+    def test_fragile_extra_per_kg(self):
+        result = shipping_cost(
+            category="fragile_extra",
+            weight_kg="0.2",
+            settings=self.cfg,
+        )
+        self.assertEqual(result["billable_kg"], 0.5)
+        self.assertEqual(result["amount_usd"], 10.0)  # 0.5 × 20
+
     def test_express_unavailable(self):
         result = shipping_cost(category="express", weight_kg="1", settings=self.cfg)
         self.assertFalse(result["available"])
