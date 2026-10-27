@@ -495,14 +495,15 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         )
 
         def _reuse_pending(pending: Payment) -> bool:
-            """Réutiliser un pending : simu carte, ou retry SasPay (pas encore de checkout_url)."""
+            """
+            Réutiliser un pending au lieu d'un 409.
+            SasPay live : toujours OK — on recrée une session (montant à jour).
+            """
             if simulate_card:
                 return True
-            if not live_saspay:
-                return False
-            if pending.payment_url:
-                return False
-            return True
+            if live_saspay:
+                return True
+            return False
 
         with transaction.atomic():
             if order is not None:
@@ -529,6 +530,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment.method = method
                     payment.phone_number = phone_number or payment.phone_number
                     payment.amount = amount
+                    # Nouvelle tentative → nouvelle session SasPay (lien précédent invalidé).
+                    payment.payment_url = None
+                    payment.external_id = None
                     if meta:
                         # Conserver les clés saspay_* utiles, écraser le meta métier.
                         prev = (
@@ -539,6 +543,17 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                         merged = dict(prev)
                         merged.update(meta)
                         payment.provider_raw_response = merged
+                    payment.save(
+                        update_fields=[
+                            "method",
+                            "phone_number",
+                            "amount",
+                            "payment_url",
+                            "external_id",
+                            "provider_raw_response",
+                            "updated_at",
+                        ]
+                    )
                 else:
                     payment = Payment.objects.create(
                         user=request.user,
@@ -575,6 +590,8 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment.method = method
                     payment.phone_number = phone_number or payment.phone_number
                     payment.amount = amount
+                    payment.payment_url = None
+                    payment.external_id = None
                     if meta:
                         prev = (
                             payment.provider_raw_response
@@ -584,6 +601,17 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                         merged = dict(prev)
                         merged.update(meta)
                         payment.provider_raw_response = merged
+                    payment.save(
+                        update_fields=[
+                            "method",
+                            "phone_number",
+                            "amount",
+                            "payment_url",
+                            "external_id",
+                            "provider_raw_response",
+                            "updated_at",
+                        ]
+                    )
                 else:
                     payment = Payment.objects.create(
                         user=request.user,
