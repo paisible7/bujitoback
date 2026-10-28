@@ -844,7 +844,21 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        pdf = build_receipt_pdf(payment)
+        try:
+            pdf = build_receipt_pdf(payment)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "receipt PDF failed payment=%s ref=%s",
+                payment.pk,
+                payment.reference,
+            )
+            return Response(
+                {"message": "Impossible de générer le reçu. Réessayez plus tard."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
         filename = f"recu-{payment.reference or payment.pk}.pdf"
         response = HttpResponse(pdf, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'

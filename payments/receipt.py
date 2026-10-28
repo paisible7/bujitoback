@@ -25,31 +25,39 @@ ORANGE_M = HexColor("#FF7900")
 LIGHT_LINE = HexColor("#DDDDDD")
 
 ASSETS = Path(__file__).resolve().parent / "assets"
+_FONTS_DIR = ASSETS / "fonts"
 _FONTS_READY = False
 
 
 def _ensure_fonts():
+    """Polices embarquées en priorité (prod Linux sans DejaVu système)."""
     global _FONTS_READY
     if _FONTS_READY:
         return
     for path in (
-        r"C:\Windows\Fonts\arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        _FONTS_DIR / "ReceiptSans.ttf",
+        Path(r"C:\Windows\Fonts\arial.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
     ):
         try:
-            pdfmetrics.registerFont(TTFont("ReceiptSans", path))
-            break
+            if path.is_file():
+                pdfmetrics.registerFont(TTFont("ReceiptSans", str(path)))
+                break
         except Exception:
             continue
     for path in (
-        r"C:\Windows\Fonts\arialbd.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        _FONTS_DIR / "ReceiptSans-Bold.ttf",
+        Path(r"C:\Windows\Fonts\arialbd.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
     ):
         try:
-            pdfmetrics.registerFont(TTFont("ReceiptSans-Bold", path))
-            break
+            if path.is_file():
+                pdfmetrics.registerFont(TTFont("ReceiptSans-Bold", str(path)))
+                break
         except Exception:
             continue
     _FONTS_READY = True
@@ -307,13 +315,29 @@ def build_receipt_pdf(payment) -> bytes:
         except Exception:
             service_amount = total - fee
 
-    user = payment.user
-    client_name = (getattr(user, "full_name", "") or "").strip() or user.email
-    phone = getattr(user, "phone_number", "") or payment.phone_number or "—"
-    email = user.email or "—"
+    user = getattr(payment, "user", None)
+    if user is not None:
+        client_name = (getattr(user, "full_name", "") or "").strip() or (
+            getattr(user, "email", None) or "—"
+        )
+        phone = (
+            getattr(user, "phone_number", None)
+            or payment.phone_number
+            or "—"
+        )
+        email = getattr(user, "email", None) or "—"
+    else:
+        client_name = "—"
+        phone = payment.phone_number or "—"
+        email = "—"
     service_label, description, tracking = _service_copy(payment, meta)
-    method = getattr(payment.method, "name", None) or getattr(payment.method, "code", "—")
-    method_code = (getattr(payment.method, "code", "") or "").lower()
+    method_obj = payment.method if payment.method_id else None
+    method = (
+        (getattr(method_obj, "name", None) or getattr(method_obj, "code", None) or "—")
+        if method_obj is not None
+        else "—"
+    )
+    method_code = (getattr(method_obj, "code", "") or "").lower() if method_obj else ""
     paid_at = payment.updated_at or payment.created_at or timezone.now()
     try:
         local_dt = timezone.localtime(paid_at)
