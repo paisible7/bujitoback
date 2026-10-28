@@ -18,6 +18,7 @@ from rest_framework.views import APIView
 
 from core.serializers import UUIDLookupMixin
 from parcels.models import Order, Parcel
+from parcels.pagination import OptionalPageNumberPagination
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 from payments.models import Payment
 from payments.serializers import PaymentSerializer
@@ -582,6 +583,7 @@ class AdminAccountingExpensesView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated, IsAppAdmin]
     serializer_class = ExpenseSerializer
     parser_classes = [JSONParser, FormParser, MultiPartParser]
+    pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
         if not can_manage_china_expenses(self.request.user):
@@ -1066,6 +1068,20 @@ class SupportChatView(APIView):
         needs_followup = bool(getattr(followup_obj, 'needs_followup', False))
         followup_note = (getattr(followup_obj, 'note', '') or '').strip()
         last_reminded = getattr(followup_obj, 'last_reminded_at', None)
+        # Limite les threads longs : dernières N messages (ordre chronologique).
+        try:
+            page_size = min(
+                200, max(20, int(request.query_params.get('page_size') or 100))
+            )
+        except (TypeError, ValueError):
+            page_size = 100
+        total = qs.count()
+        ordered = qs.order_by('created_at')
+        if total > page_size:
+            recent_ids = list(
+                qs.order_by('-created_at').values_list('pk', flat=True)[:page_size]
+            )
+            ordered = qs.filter(pk__in=recent_ids).order_by('created_at')
         return Response(
             {
                 'client_id': client.pk,
@@ -1078,8 +1094,10 @@ class SupportChatView(APIView):
                 'last_reminded_at': (
                     last_reminded.isoformat() if last_reminded is not None else None
                 ),
+                'count': total,
+                'page_size': page_size,
                 'results': SupportMessageSerializer(
-                    qs, many=True, context={'request': request}
+                    ordered, many=True, context={'request': request}
                 ).data,
             }
         )

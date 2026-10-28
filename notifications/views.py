@@ -2,6 +2,7 @@ from rest_framework import viewsets, status, decorators
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from core.serializers import UUIDLookupMixin
+from parcels.pagination import OptionalPageNumberPagination
 from .models import Notification, FCMDevice
 from .serializers import NotificationSerializer, AdminSendNotificationSerializer
 from .utils import send_fcm_notification
@@ -32,9 +33,12 @@ def _as_plain_dict(data):
 class NotificationViewSet(UUIDLookupMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = NotificationSerializer
+    pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
-        return Notification.objects.filter(user=self.request.user)
+        return Notification.objects.filter(user=self.request.user).order_by(
+            "-created_at"
+        )
 
     @decorators.action(detail=False, methods=['post'], url_path='register-device')
     def register_device(self, request):

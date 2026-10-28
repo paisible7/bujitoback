@@ -36,7 +36,7 @@ from users.roles import is_app_admin
 from users.models import CustomUser
 from users.admin_permissions import is_shipments_reception_only
 from notifications.utils import notify_admins, send_fcm_notification
-from .pagination import OptionalPageNumberPagination
+from .pagination import OptionalPageNumberPagination, paginate_queryset_response
 from core.serializers import UUIDLookupMixin, lookup_optional, resolve_uuid_or_pk
 
 
@@ -1881,7 +1881,10 @@ class ExpeditionListCreateView(APIView):
         status_filter = (request.query_params.get('status') or '').strip()
         if status_filter:
             qs = qs.filter(status=status_filter)
-        return Response(ExpeditionRequestSerializer(qs, many=True).data)
+        qs = qs.order_by('-created_at')
+        return paginate_queryset_response(
+            qs, request, ExpeditionRequestSerializer
+        )
 
     def post(self, request):
         return _expedition_quote_or_create(request, create=True)
@@ -2098,8 +2101,11 @@ class ShipmentBatchListCreateView(APIView):
                 valid = {c[0] for c in ShipmentBatch.STATUS_CHOICES}
                 if status_filter in valid:
                     batches = batches.filter(status=status_filter)
-        return Response(
-            ShipmentBatchSerializer(batches, many=True, context={'request': request}).data
+        return paginate_queryset_response(
+            batches,
+            request,
+            ShipmentBatchSerializer,
+            context={'request': request},
         )
 
     def post(self, request):

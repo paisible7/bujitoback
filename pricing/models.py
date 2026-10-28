@@ -130,6 +130,12 @@ class BusinessSettings(PublicUUIDModel):
         default=Decimal("6.3000"),
         verbose_name=_("1 USD → CNY (yuan)"),
     )
+    usd_to_eur = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=Decimal("0.920000"),
+        verbose_name=_("1 USD → EUR (€)"),
+    )
     alipay_wechat_recharge_fee_percent = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -144,6 +150,14 @@ class BusinessSettings(PublicUUIDModel):
         validators=[MinValueValidator(0), MaxValueValidator(100)],
         verbose_name=_("Frais de traitement API paiement (%)"),
         help_text=_("Frais gateway débités au client (hors recharge Alipay/WeChat)."),
+    )
+    money_transfer_fee_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        verbose_name=_("Frais de transfert d'argent (%)"),
+        help_text=_("Frais appliqués aux transferts d’argent (hors recharge Alipay/WeChat)."),
     )
 
     # --- Adresse entrepôt Chine (globale, affiché sur tous les profils clients) ---

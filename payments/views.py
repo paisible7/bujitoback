@@ -24,6 +24,7 @@ from .serializers import (
 from .services import PaymentService
 from .saspay_client import SasPayError, saspay_enabled
 from .webhook_security import verify_incoming_webhook
+from parcels.pagination import OptionalPageNumberPagination
 
 
 # Moyens affichés au checkout client (Mobile Money, Wave, carte).
@@ -112,6 +113,27 @@ def _with_processing_fee(service_amount: Decimal, meta: dict | None = None):
         }
     )
     return total, meta
+
+
+def _with_money_transfer_fee(service_amount: Decimal, meta: dict | None = None):
+    """Frais spécifiques au transfert d'argent (+ frais gateway éventuels)."""
+    meta = dict(meta or {})
+    settings = BusinessSettings.load()
+    transfer_rate = settings.money_transfer_fee_percent or Decimal("0")
+    transfer_fee = (service_amount * transfer_rate / Decimal("100")).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    after_transfer = service_amount + transfer_fee
+    meta.update(
+        {
+            "service_amount": str(service_amount),
+            "money_transfer_fee": str(transfer_fee),
+            "money_transfer_fee_rate": str(transfer_rate),
+        }
+    )
+    # Empile aussi les frais gateway (SasPay) si configurés.
+    return _with_processing_fee(after_transfer, meta)
 
 
 def _ensure_checkout_payment_methods():
@@ -273,9 +295,10 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = PaymentSerializer
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [JSONParser, FormParser, MultiPartParser]
+    pagination_class = OptionalPageNumberPagination
 
     def get_queryset(self):
-        return self.queryset.filter(user=self.request.user)
+        return self.queryset.filter(user=self.request.user).order_by("-created_at")
 
     def _serialize_payment(self, payment, request):
         return PaymentSerializer(payment, context={'request': request}).data
@@ -293,15 +316,35 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         qr_image = request.FILES.get("qr_image") if is_transfer else None
         transfer_purpose = (request.data.get("purpose") or "").strip().lower() if is_transfer else ""
         qr_provider = (request.data.get("qr_provider") or "").strip().lower() if is_transfer else ""
+        # Exception : client a payé via notre QR Alipay/WeChat → preuve + validation admin.
+        via_company_qr = False
+        if is_transfer:
+            raw_via_qr = request.data.get("via_company_qr")
+            via_company_qr = str(raw_via_qr).strip().lower() in {"1", "true", "yes"}
+            if via_company_qr and proof_image is None:
+                return Response(
+                    {
+                        "message": (
+                            "proof_image is required when paying via company QR"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         if not method_code:
             return Response({"message": "method is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        available = set(_available_method_codes())
-        if method_code not in available:
-            return Response({"message": "Payment method not available"}, status=status.HTTP_400_BAD_REQUEST)
-
-        method = _ensure_method(method_code)
+        if via_company_qr:
+            # Preuve QR : méthode libre (souvent bank_transfer), créée à la volée.
+            method = _ensure_method(method_code)
+        else:
+            available = set(_available_method_codes())
+            if method_code not in available:
+                return Response(
+                    {"message": "Payment method not available"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            method = _ensure_method(method_code)
         if not method.is_active:
             return Response({"message": "Payment method inactive"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -324,9 +367,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 raw_currency = "FCFA"
             if raw_currency == "FC":
                 raw_currency = "CDF"
-            if raw_currency not in {"USD", "FCFA", "CDF", "GBP"}:
+            if raw_currency not in {"USD", "FCFA", "CDF", "GBP", "CNY", "EUR"}:
                 return Response(
-                    {"message": "currency must be USD, FCFA, CDF or GBP"},
+                    {"message": "currency must be USD, FCFA, CDF, GBP, CNY or EUR"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             transfer_currency = raw_currency
@@ -376,6 +419,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 "note": note,
                 "currency": transfer_currency,
                 "purpose": transfer_purpose or "other",
+                "via_company_qr": via_company_qr,
             }
             if qr_provider in ("alipay", "wechat"):
                 meta["qr_provider"] = qr_provider
@@ -389,7 +433,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     "processing_fee_rate": str(fee_rate),
                 })
             else:
-                amount, meta = _with_processing_fee(amount, meta)
+                amount, meta = _with_money_transfer_fee(amount, meta)
             if qr_image is not None:
                 meta["has_qr_image"] = True
         elif is_expedition:
@@ -467,7 +511,9 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                 {"type": "order", "order_id": order.pk},
             )
 
-        live_saspay = saspay_enabled() and not is_transfer
+        # SasPay pour commandes / expéditions / transferts en ligne.
+        # Exception QR société : pas de checkout, validation admin sur preuve.
+        live_saspay = saspay_enabled() and not via_company_qr
 
         if (
             method_code in {"orange_money", "mtn_momo", "wave", "moov"}
@@ -643,24 +689,38 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         checkout_url = None
         message = "Paiement initialisé"
 
-        if is_transfer:
-            # Transfert d'argent = service à part : reste en attente jusqu'à confirmation admin.
-            message = "Transfert initié — en attente de confirmation"
+        if is_transfer and (via_company_qr or not live_saspay):
+            # QR société (+ preuve) ou environnement sans SasPay → validation admin.
+            message = (
+                "Transfert initié — en attente de confirmation"
+                if via_company_qr or not live_saspay
+                else message
+            )
             try:
                 from notifications.utils import notify_admins, send_fcm_notification
 
                 amount_label = _format_payment_amount(payment.amount, payment.currency)
                 beneficiary = (meta or {}).get("beneficiary_name") or "—"
+                title = (
+                    "Nouveau transfert (preuve QR)"
+                    if via_company_qr
+                    else "Nouveau transfert d'argent"
+                )
+                detail = (
+                    f"Réf. {payment.reference}. Preuve à valider."
+                    if via_company_qr
+                    else f"Réf. {payment.reference}. À valider dans Gestion des paiements."
+                )
                 notify_admins(
-                    "Nouveau transfert d'argent",
-                    f"{request.user.email} · {amount_label} → {beneficiary}. "
-                    f"Réf. {payment.reference}. À valider dans Gestion des paiements.",
+                    title,
+                    f"{request.user.email} · {amount_label} → {beneficiary}. {detail}",
                     type="payment",
                     reference_id=payment.pk,
                     data={
                         "type": "payment",
                         "payment_id": str(payment.pk),
                         "transfer": "1",
+                        **({"via_company_qr": "1"} if via_company_qr else {}),
                     },
                 )
                 send_fcm_notification(
@@ -838,9 +898,15 @@ code{{color:#facc15}}
 
     @action(detail=False, methods=["get"])
     def history(self, request):
-        payments = self.get_queryset().order_by("-created_at")
+        payments = self.get_queryset()
+        page = self.paginate_queryset(payments)
+        if page is not None:
+            serializer = PaymentSerializer(
+                page, many=True, context={"request": request}
+            )
+            return self.get_paginated_response(serializer.data)
         serializer = PaymentSerializer(
-            payments, many=True, context={'request': request}
+            payments, many=True, context={"request": request}
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -858,8 +924,14 @@ code{{color:#facc15}}
                 "user", "order", "method", "expedition"
             ).order_by("-created_at")
         )
+        page = self.paginate_queryset(payments)
+        if page is not None:
+            serializer = PaymentSerializer(
+                page, many=True, context={"request": request}
+            )
+            return self.get_paginated_response(serializer.data)
         serializer = PaymentSerializer(
-            payments, many=True, context={'request': request}
+            payments, many=True, context={"request": request}
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
