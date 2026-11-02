@@ -65,6 +65,21 @@ class PasswordResetFlowTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_authenticated_change_password(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/auth/change-password/',
+            {
+                'current_password': 'OldPass123!',
+                'new_password': 'FreshPass789!',
+                'confirm_password': 'FreshPass789!',
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password('FreshPass789!'))
+
 
 class ProfileCountsAndAddressesTests(TestCase):
     def setUp(self):

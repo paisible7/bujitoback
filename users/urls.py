@@ -7,6 +7,7 @@ from .views import (
     AgentSalaryView,
     PasswordResetVerifyView,
     PasswordResetView,
+    ChangePasswordView,
 )
 
 urlpatterns = [
@@ -37,5 +38,10 @@ urlpatterns = [
         'password-reset/',
         PasswordResetView.as_view(),
         name='auth_password_reset',
+    ),
+    path(
+        'change-password/',
+        ChangePasswordView.as_view(),
+        name='auth_change_password',
     ),
 ]

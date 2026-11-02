@@ -99,6 +99,9 @@ class UserSerializer(serializers.ModelSerializer):
     parcels_sent_count = serializers.IntegerField(
         read_only=True, required=False, default=0
     )
+    invoices_to_pay_count = serializers.IntegerField(
+        read_only=True, required=False, default=0
+    )
     admin_permissions = serializers.SerializerMethodField()
     service_percentages = serializers.SerializerMethodField()
     last_salary_payment = serializers.SerializerMethodField()
@@ -112,6 +115,7 @@ class UserSerializer(serializers.ModelSerializer):
             'profile_photo_url',
             'orders_count', 'parcels_count',
             'parcels_received_count', 'parcels_sent_count',
+            'invoices_to_pay_count',
             'admin_permissions',
             'service_percentages',
             'worker_status',
@@ -125,6 +129,7 @@ class UserSerializer(serializers.ModelSerializer):
             'profile_photo_url',
             'orders_count', 'parcels_count',
             'parcels_received_count', 'parcels_sent_count',
+            'invoices_to_pay_count',
             'admin_permissions',
             'service_percentages',
             'worker_status',
@@ -204,6 +209,24 @@ class UserSerializer(serializers.ModelSerializer):
                 order__user_id=instance.pk,
                 status__in=PARCEL_SENT_STATUSES,
             ).count()
+        if not hasattr(instance, 'invoices_to_pay_count'):
+            from parcels.models import ExpeditionRequest, Order
+
+            unpaid_orders = (
+                Order.objects.filter(
+                    user_id=instance.pk,
+                    quote_ready=True,
+                    status__in=('pending', 'processing'),
+                )
+                .exclude(payments__status='completed')
+                .distinct()
+                .count()
+            )
+            unpaid_expeditions = ExpeditionRequest.objects.filter(
+                user_id=instance.pk,
+                status__in=('quoted', 'awaiting_payment'),
+            ).count()
+            data['invoices_to_pay_count'] = unpaid_orders + unpaid_expeditions
         return data
 
 
@@ -658,4 +681,33 @@ class PasswordResetSerializer(serializers.Serializer):
         user = User.objects.get(email__iexact=email, is_active=True)
         user.set_password(self.validated_data['password'])
         user.save()
+        return user
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """Changement de mot de passe pour un utilisateur authentifié."""
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=6)
+    confirm_password = serializers.CharField(write_only=True, min_length=6)
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        if not user.check_password(attrs['current_password']):
+            raise serializers.ValidationError({
+                'current_password': 'Mot de passe actuel incorrect.',
+            })
+        if attrs['new_password'] != attrs['confirm_password']:
+            raise serializers.ValidationError({
+                'confirm_password': 'Les mots de passe ne correspondent pas.',
+            })
+        if user.check_password(attrs['new_password']):
+            raise serializers.ValidationError({
+                'new_password': 'Le nouveau mot de passe doit être différent.',
+            })
+        return attrs
+
+    def save(self, **kwargs):
+        user = self.context['request'].user
+        user.set_password(self.validated_data['new_password'])
+        user.save(update_fields=['password'])
         return user

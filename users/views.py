@@ -28,6 +28,7 @@ from .serializers import (
     CustomTokenObtainPairSerializer,
     PasswordResetVerifySerializer,
     PasswordResetSerializer,
+    ChangePasswordSerializer,
     build_china_warehouse_address,
     build_china_air_address,
     build_china_sea_address,
@@ -131,7 +132,7 @@ class UserProfileView(APIView):
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def _enriched_user(self, request):
-        from parcels.models import Parcel
+        from parcels.models import ExpeditionRequest, Order, Parcel
         from parcels.ownership import parcels_for_user_q
         from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 
@@ -152,6 +153,22 @@ class UserProfileView(APIView):
         ).count()
         if not hasattr(user, 'orders_count'):
             user.orders_count = request.user.orders.count()
+
+        unpaid_orders = (
+            Order.objects.filter(
+                user_id=request.user.pk,
+                quote_ready=True,
+                status__in=('pending', 'processing'),
+            )
+            .exclude(payments__status='completed')
+            .distinct()
+            .count()
+        )
+        unpaid_expeditions = ExpeditionRequest.objects.filter(
+            user_id=request.user.pk,
+            status__in=('quoted', 'awaiting_payment'),
+        ).count()
+        user.invoices_to_pay_count = unpaid_orders + unpaid_expeditions
         return user
 
     def get(self, request):
@@ -599,6 +616,23 @@ class PasswordResetView(APIView):
 
     def post(self, request):
         serializer = PasswordResetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {'detail': 'Mot de passe mis à jour avec succès.'},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ChangePasswordView(APIView):
+    """Changer le mot de passe (utilisateur connecté)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(
+            data=request.data,
+            context={'request': request},
+        )
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(
