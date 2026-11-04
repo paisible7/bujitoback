@@ -281,16 +281,39 @@ def _order_post_save(sender, instance: Order, created: bool, **kwargs):
     )
 
 
+def _consolidation_ref_id(group: Consolidation):
+    """Préfère l’UUID public (aligné avec l’API Flutter)."""
+    return str(getattr(group, "uuid", None) or group.pk)
+
+
 @receiver(pre_save, sender=Consolidation)
 def _consolidation_pre_save(sender, instance: Consolidation, **kwargs):
     if not instance.pk:
         instance._old_status = None
+        instance._old_weight_kg = None
+        instance._old_billable_weight_kg = None
+        instance._old_grouping_fee = None
+        instance._old_admin_note = None
         return
     try:
-        old = Consolidation.objects.only("status").get(pk=instance.pk)
+        old = Consolidation.objects.only(
+            "status",
+            "weight_kg",
+            "billable_weight_kg",
+            "grouping_fee",
+            "admin_note",
+        ).get(pk=instance.pk)
         instance._old_status = old.status
+        instance._old_weight_kg = old.weight_kg
+        instance._old_billable_weight_kg = old.billable_weight_kg
+        instance._old_grouping_fee = old.grouping_fee
+        instance._old_admin_note = old.admin_note
     except Consolidation.DoesNotExist:
         instance._old_status = None
+        instance._old_weight_kg = None
+        instance._old_billable_weight_kg = None
+        instance._old_grouping_fee = None
+        instance._old_admin_note = None
 
 
 @receiver(post_save, sender=Consolidation)
@@ -307,6 +330,10 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
     client_edited = bool(getattr(instance, "_client_edited", False))
     old_status = getattr(instance, "_old_status", None)
     new_status = instance.status
+    old_weight_kg = getattr(instance, "_old_weight_kg", None)
+    old_billable_weight_kg = getattr(instance, "_old_billable_weight_kg", None)
+    old_grouping_fee = getattr(instance, "_old_grouping_fee", None)
+    old_admin_note = getattr(instance, "_old_admin_note", None)
 
     def _notify():
         from django.contrib.auth import get_user_model
@@ -324,6 +351,8 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
             )
             return
 
+        ref_id = _consolidation_ref_id(group)
+
         if client_edited:
             parcel_count = group.parcels.count()
             note = (group.client_note or "").strip()
@@ -337,10 +366,10 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
                 "Groupage modifié",
                 admin_body,
                 type="consolidation",
-                reference_id=group.pk,
+                reference_id=ref_id,
                 data={
                     "type": "consolidation",
-                    "reference_id": group.pk,
+                    "reference_id": ref_id,
                     "action": "quote",
                 },
             )
@@ -352,13 +381,51 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
                     "Un nouveau devis poids/frais vous sera propose."
                 ),
                 type="consolidation",
-                reference_id=group.pk,
+                reference_id=ref_id,
                 data={
                     "type": "consolidation",
-                    "reference_id": group.pk,
+                    "reference_id": ref_id,
                     "action": "edited",
                 },
             )
+            return
+
+        # Devis admin (poids / frais) sans changement de statut — comme les commandes.
+        # Si le statut change aussi (accept/refus), on envoie seulement la notif de statut.
+        quote_updated = (
+            group.weight_kg != old_weight_kg
+            or group.billable_weight_kg != old_billable_weight_kg
+            or group.grouping_fee != old_grouping_fee
+        )
+        has_quote = group.weight_kg is not None or group.grouping_fee is not None
+        if quote_updated and has_quote and old_status == new_status:
+            fee = group.grouping_fee
+            weight = group.billable_weight_kg or group.weight_kg
+            parts = [f"Le devis de votre groupage #{group.pk} est pret."]
+            if weight is not None:
+                parts.append(f"Poids : {weight} kg.")
+            if fee is not None:
+                parts.append(f"Frais de groupage : {fee} USD.")
+            note = (group.admin_note or "").strip()
+            if note and note != (old_admin_note or "").strip():
+                parts.append(f"Note : {note}")
+            try:
+                send_fcm_notification(
+                    user,
+                    "Devis groupage disponible",
+                    " ".join(parts),
+                    type="consolidation",
+                    reference_id=ref_id,
+                    data={
+                        "type": "consolidation",
+                        "reference_id": ref_id,
+                        "action": "quote_ready",
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Échec notif devis groupage #%s", group.pk
+                )
             return
 
         if old_status == new_status:
@@ -395,11 +462,11 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
                     "Groupage accepte",
                     body,
                     type="consolidation",
-                    reference_id=group.pk,
+                    reference_id=ref_id,
                     image=note_image if note_image else None,
                     data={
                         "type": "consolidation",
-                        "reference_id": group.pk,
+                        "reference_id": ref_id,
                         "status": "completed",
                         "admin_note": note,
                     },
@@ -418,10 +485,10 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
                 "Groupage refuse",
                 body,
                 type="consolidation",
-                reference_id=group.pk,
+                reference_id=ref_id,
                 data={
                     "type": "consolidation",
-                    "reference_id": group.pk,
+                    "reference_id": ref_id,
                     "status": "cancelled",
                     "admin_note": note,
                 },
@@ -432,10 +499,10 @@ def _consolidation_post_save(sender, instance: Consolidation, created: bool, **k
                 "Groupage en cours",
                 f"Votre groupage #{group.pk} est en cours de preparation.",
                 type="consolidation",
-                reference_id=group.pk,
+                reference_id=ref_id,
                 data={
                     "type": "consolidation",
-                    "reference_id": group.pk,
+                    "reference_id": ref_id,
                     "status": "processing",
                 },
             )

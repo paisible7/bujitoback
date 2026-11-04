@@ -11,8 +11,10 @@ from .views import (
     SupportAutoMessageListCreateView,
     SupportAutoMessageRunDueView,
     SupportChatView,
+    SupportMessagePinView,
     SupportQuickReplyDetailView,
     SupportQuickReplyListCreateView,
+    SupportThreadPinView,
 )
 
 urlpatterns = [
@@ -69,6 +71,21 @@ urlpatterns = [
         name='support-auto-message-detail',
     ),
     path('support-chat/', SupportChatView.as_view(), name='support-chat'),
+    path(
+        'support-chat/messages/<str:message_id>/pin/',
+        SupportMessagePinView.as_view(),
+        name='support-chat-message-pin',
+    ),
+    path(
+        'support-chat/pin/',
+        SupportThreadPinView.as_view(),
+        name='support-chat-thread-pin-me',
+    ),
+    path(
+        'support-chat/<str:client_id>/pin/',
+        SupportThreadPinView.as_view(),
+        name='support-chat-thread-pin',
+    ),
     path(
         'support-chat/<str:client_id>/',
         SupportChatView.as_view(),

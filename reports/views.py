@@ -6,7 +6,7 @@ from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, F, Max, Q, Sum
+from django.db.models import BooleanField, Case, Count, F, Max, Q, Sum, Value, When
 from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework.views import APIView
 
-from core.serializers import UUIDLookupMixin
+from core.serializers import UUIDLookupMixin, resolve_uuid_or_pk
 from parcels.models import Order, Parcel
 from parcels.pagination import OptionalPageNumberPagination
 from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
@@ -28,6 +28,7 @@ from .models import (
     SupportAutoMessage,
     SupportMessage,
     SupportQuickReply,
+    SupportThreadMeta,
 )
 from .serializers import (
     ExpenseSerializer,
@@ -955,7 +956,7 @@ class SupportChatView(APIView):
         )
         qs = (
             User.objects.filter(role__in=CLIENT_ROLES)
-            .select_related('support_followup')
+            .select_related('support_followup', 'support_thread_meta')
             .annotate(
                 messages_count=Count('support_threads', distinct=True),
                 unread_count=Count(
@@ -967,6 +968,11 @@ class SupportChatView(APIView):
                     distinct=True,
                 ),
                 last_message_at=Max('support_threads__created_at'),
+                pinned_flag=Case(
+                    When(support_thread_meta__is_pinned=True, then=Value(True)),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                ),
             )
         )
         if followup_only:
@@ -980,6 +986,7 @@ class SupportChatView(APIView):
                 | Q(support_followup__note__icontains=search)
             )
         qs = qs.order_by(
+            '-pinned_flag',
             '-unread_count',
             F('support_followup__needs_followup').desc(nulls_last=True),
             F('last_message_at').desc(nulls_last=True),
@@ -1000,9 +1007,11 @@ class SupportChatView(APIView):
                 .first()
             )
             followup_obj = getattr(u, 'support_followup', None)
+            thread_meta = getattr(u, 'support_thread_meta', None)
             needs_followup = bool(getattr(followup_obj, 'needs_followup', False))
             followup_note = (getattr(followup_obj, 'note', '') or '').strip()
             last_reminded = getattr(followup_obj, 'last_reminded_at', None)
+            is_pinned = bool(getattr(thread_meta, 'is_pinned', False))
             unread_total += int(u.unread_count or 0)
             threads.append(
                 {
@@ -1016,6 +1025,7 @@ class SupportChatView(APIView):
                     'unread_count': int(u.unread_count or 0),
                     'needs_followup': needs_followup,
                     'followup_note': followup_note,
+                    'is_pinned': is_pinned,
                     'last_reminded_at': (
                         last_reminded.isoformat() if last_reminded is not None else None
                     ),
@@ -1068,6 +1078,13 @@ class SupportChatView(APIView):
         needs_followup = bool(getattr(followup_obj, 'needs_followup', False))
         followup_note = (getattr(followup_obj, 'note', '') or '').strip()
         last_reminded = getattr(followup_obj, 'last_reminded_at', None)
+        thread_meta = SupportThreadMeta.objects.filter(client=client).first()
+        is_pinned = bool(getattr(thread_meta, 'is_pinned', False))
+        pinned_qs = (
+            SupportMessage.objects.filter(client=client, is_pinned=True)
+            .select_related('sender', 'client')
+            .order_by('-pinned_at', '-created_at')[:20]
+        )
         # Limite les threads longs : dernières N messages (ordre chronologique).
         try:
             page_size = min(
@@ -1091,11 +1108,15 @@ class SupportChatView(APIView):
                 'unread_count': unread_count,
                 'needs_followup': needs_followup,
                 'followup_note': followup_note,
+                'is_pinned': is_pinned,
                 'last_reminded_at': (
                     last_reminded.isoformat() if last_reminded is not None else None
                 ),
                 'count': total,
                 'page_size': page_size,
+                'pinned_messages': SupportMessageSerializer(
+                    pinned_qs, many=True, context={'request': request}
+                ).data,
                 'results': SupportMessageSerializer(
                     ordered, many=True, context={'request': request}
                 ).data,
@@ -1156,7 +1177,13 @@ class SupportChatView(APIView):
             elif attachment is not None:
                 import os
                 fname = os.path.basename(str(getattr(attachment, 'name', '') or 'fichier'))
-                preview = f'Pièce jointe dans le chat : {fname}'
+                ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else ''
+                if ext in {
+                    'm4a', 'aac', 'mp3', 'ogg', 'oga', 'opus', 'wav', 'webm', 'caf', 'amr', '3gp',
+                }:
+                    preview = 'Note vocale'
+                else:
+                    preview = f'Pièce jointe dans le chat : {fname}'
             else:
                 preview = 'Nouveau message dans le chat support.'
             if is_app_admin(request.user):
@@ -1194,6 +1221,76 @@ class SupportChatView(APIView):
         return Response(
             SupportMessageSerializer(msg, context={'request': request}).data,
             status=201,
+        )
+
+
+class SupportMessagePinView(APIView):
+    """Épingler / désépingler un message du fil support."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, message_id):
+        try:
+            msg = resolve_uuid_or_pk(SupportMessage.objects.select_related('client'), message_id)
+        except SupportMessage.DoesNotExist:
+            return Response({'detail': 'Message introuvable.'}, status=404)
+
+        if is_app_admin(request.user):
+            pass
+        elif msg.client_id != request.user.pk:
+            return Response({'detail': 'Accès refusé.'}, status=403)
+
+        pinned = request.data.get('pinned')
+        if pinned is None:
+            new_value = not msg.is_pinned
+        else:
+            new_value = str(pinned).strip().lower() in ('1', 'true', 'yes', 'on')
+
+        msg.is_pinned = new_value
+        msg.pinned_at = timezone.now() if new_value else None
+        msg.save(update_fields=['is_pinned', 'pinned_at'])
+        return Response(
+            SupportMessageSerializer(msg, context={'request': request}).data
+        )
+
+
+class SupportThreadPinView(APIView):
+    """Épingler / désépingler une conversation support (inbox)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, client_id=None):
+        if is_app_admin(request.user):
+            raw = str(
+                client_id
+                or request.data.get('client_id')
+                or request.data.get('client')
+                or ''
+            ).strip()
+            if not raw:
+                return Response({'detail': 'client_id requis.'}, status=400)
+            client = SupportChatView()._find_client_user(raw)
+            if client is None:
+                return Response({'detail': 'Client introuvable.'}, status=404)
+        else:
+            client = request.user
+
+        pinned = request.data.get('pinned')
+        meta, _ = SupportThreadMeta.objects.get_or_create(client=client)
+        if pinned is None:
+            new_value = not meta.is_pinned
+        else:
+            new_value = str(pinned).strip().lower() in ('1', 'true', 'yes', 'on')
+
+        meta.is_pinned = new_value
+        meta.pinned_at = timezone.now() if new_value else None
+        meta.save(update_fields=['is_pinned', 'pinned_at', 'updated_at'])
+        return Response(
+            {
+                'client_id': client.pk,
+                'is_pinned': meta.is_pinned,
+                'pinned_at': meta.pinned_at.isoformat() if meta.pinned_at else None,
+            }
         )
 
 

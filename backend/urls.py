@@ -9,7 +9,11 @@ from rest_framework_simplejwt.views import (
 )
 from users.views import CustomTokenObtainPairView
 from notifications.views import NotificationViewSet
-from reports.views import SupportChatView
+from reports.views import (
+    SupportChatView,
+    SupportMessagePinView,
+    SupportThreadPinView,
+)
 
 router = DefaultRouter()
 router.register(r'notifications', NotificationViewSet, basename='notification')
@@ -35,6 +39,21 @@ urlpatterns = [
     path('api/admin/', include('reports.urls')),
     # Chat Service client (accessible client + admin)
     path('api/support-chat/', SupportChatView.as_view(), name='support-chat-me'),
+    path(
+        'api/support-chat/messages/<str:message_id>/pin/',
+        SupportMessagePinView.as_view(),
+        name='support-chat-message-pin',
+    ),
+    path(
+        'api/support-chat/pin/',
+        SupportThreadPinView.as_view(),
+        name='support-chat-thread-pin-me',
+    ),
+    path(
+        'api/support-chat/<str:client_id>/pin/',
+        SupportThreadPinView.as_view(),
+        name='support-chat-thread-pin',
+    ),
     path(
         'api/support-chat/<str:client_id>/',
         SupportChatView.as_view(),

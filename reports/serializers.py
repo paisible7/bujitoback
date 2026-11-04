@@ -165,6 +165,11 @@ class ExpenseSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
         return expense
 
 
+_AUDIO_EXTS = frozenset({
+    'm4a', 'aac', 'mp3', 'ogg', 'oga', 'opus', 'wav', 'webm', 'caf', 'amr', '3gp',
+})
+
+
 class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     sender_name = serializers.SerializerMethodField()
     client_name = serializers.SerializerMethodField()
@@ -173,20 +178,23 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
     attachment_url = serializers.SerializerMethodField()
     attachment_name = serializers.SerializerMethodField()
     attachment_is_image = serializers.SerializerMethodField()
+    attachment_is_audio = serializers.SerializerMethodField()
 
     class Meta:
         model = SupportMessage
         fields = (
             'id', 'client', 'client_name', 'client_email',
             'sender', 'sender_name', 'is_from_admin',
-            'body', 'attachment_url', 'attachment_name', 'attachment_is_image',
-            'is_read', 'created_at',
+            'body', 'attachment_url', 'attachment_name',
+            'attachment_is_image', 'attachment_is_audio',
+            'is_read', 'is_pinned', 'pinned_at', 'created_at',
         )
         read_only_fields = (
             'id', 'client', 'client_name', 'client_email',
             'sender', 'sender_name', 'is_from_admin',
-            'attachment_url', 'attachment_name', 'attachment_is_image',
-            'is_read', 'created_at',
+            'attachment_url', 'attachment_name',
+            'attachment_is_image', 'attachment_is_audio',
+            'is_read', 'is_pinned', 'pinned_at', 'created_at',
         )
 
     def get_sender_name(self, obj):
@@ -219,6 +227,11 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
         name = self.get_attachment_name(obj) or ''
         ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
         return ext in {'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'}
+
+    def get_attachment_is_audio(self, obj):
+        name = self.get_attachment_name(obj) or ''
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        return ext in _AUDIO_EXTS
 
 
 class SupportQuickReplySerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):

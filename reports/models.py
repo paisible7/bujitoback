@@ -86,6 +86,16 @@ class SupportMessage(PublicUUIDModel):
         verbose_name=_('Pièce jointe'),
     )
     is_read = models.BooleanField(default=False, db_index=True, verbose_name=_('Lu'))
+    is_pinned = models.BooleanField(
+        default=False,
+        db_index=True,
+        verbose_name=_('Épinglé'),
+    )
+    pinned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_('Épinglé le'),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -95,6 +105,35 @@ class SupportMessage(PublicUUIDModel):
 
     def __str__(self):
         return f'{self.sender_id} → {self.client_id}: {self.body[:40]}'
+
+
+class SupportThreadMeta(models.Model):
+    """Métadonnées d’une conversation support (ex. épinglage inbox)."""
+
+    client = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='support_thread_meta',
+        verbose_name=_('Client'),
+    )
+    is_pinned = models.BooleanField(
+        default=False,
+        db_index=True,
+        verbose_name=_('Conversation épinglée'),
+    )
+    pinned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_('Épinglée le'),
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _('Méta conversation support')
+        verbose_name_plural = _('Métas conversations support')
+
+    def __str__(self):
+        return f'ThreadMeta(client={self.client_id}, pinned={self.is_pinned})'
 
 
 class ClientFollowUp(PublicUUIDModel):

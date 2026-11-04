@@ -1,8 +1,11 @@
 import base64
+import logging
 import os
 import re
 import zipfile
 from django.core.files.base import ContentFile
+
+logger = logging.getLogger(__name__)
 from rest_framework import generics, status, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -895,24 +898,27 @@ class ParcelGroupView(APIView):
         )
         if client_note:
             admin_body = f"{admin_body} Description: {client_note}"
+        ref_id = str(getattr(consolidation, "uuid", None) or consolidation.pk)
         try:
             notify_admins(
                 "Nouvelle demande de groupage",
                 admin_body,
                 type="consolidation",
-                reference_id=consolidation.pk,
-                data={"type": "consolidation", "reference_id": consolidation.pk},
+                reference_id=ref_id,
+                data={"type": "consolidation", "reference_id": ref_id},
             )
             send_fcm_notification(
                 user,
                 "Demande de groupage envoyee",
                 f"Votre demande de groupage #{consolidation.pk} ({parcel_count} colis) est en attente de validation.",
                 type="consolidation",
-                reference_id=consolidation.pk,
-                data={"type": "consolidation", "reference_id": consolidation.pk},
+                reference_id=ref_id,
+                data={"type": "consolidation", "reference_id": ref_id},
             )
         except Exception:
-            pass
+            logger.exception(
+                "Échec notif création groupage #%s", consolidation.pk
+            )
 
         response_serializer = ConsolidationSerializer(
             consolidation, context={'request': request}
