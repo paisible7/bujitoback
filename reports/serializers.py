@@ -179,6 +179,7 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
     attachment_name = serializers.SerializerMethodField()
     attachment_is_image = serializers.SerializerMethodField()
     attachment_is_audio = serializers.SerializerMethodField()
+    reply_to = serializers.SerializerMethodField()
 
     class Meta:
         model = SupportMessage
@@ -187,6 +188,7 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
             'sender', 'sender_name', 'is_from_admin',
             'body', 'attachment_url', 'attachment_name',
             'attachment_is_image', 'attachment_is_audio',
+            'reply_to',
             'is_read', 'is_pinned', 'pinned_at', 'created_at',
         )
         read_only_fields = (
@@ -194,6 +196,7 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
             'sender', 'sender_name', 'is_from_admin',
             'attachment_url', 'attachment_name',
             'attachment_is_image', 'attachment_is_audio',
+            'reply_to',
             'is_read', 'is_pinned', 'pinned_at', 'created_at',
         )
 
@@ -232,6 +235,42 @@ class SupportMessageSerializer(PublicUUIDSerializerMixin, serializers.ModelSeria
         name = self.get_attachment_name(obj) or ''
         ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
         return ext in _AUDIO_EXTS
+
+    def get_reply_to(self, obj):
+        parent = getattr(obj, 'reply_to', None)
+        if parent is None:
+            return None
+        from users.roles import is_app_admin
+        import os
+        name = None
+        if parent.attachment and getattr(parent.attachment, 'name', None):
+            name = os.path.basename(str(parent.attachment.name))
+        ext = name.rsplit('.', 1)[-1].lower() if name and '.' in name else ''
+        body = (parent.body or '').strip()
+        preview = body
+        if not preview:
+            if ext in _AUDIO_EXTS:
+                preview = 'Note vocale'
+            elif ext in {'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'}:
+                preview = 'Photo'
+            elif name:
+                preview = name
+            else:
+                preview = 'Message'
+        return {
+            'id': str(parent.uuid),
+            'sender_name': (
+                (getattr(parent.sender, 'full_name', '') or '').strip()
+                or parent.sender.email
+            ),
+            'is_from_admin': is_app_admin(parent.sender),
+            'body': body[:280],
+            'preview': preview[:280],
+            'attachment_is_image': ext in {
+                'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif',
+            },
+            'attachment_is_audio': ext in _AUDIO_EXTS,
+        }
 
 
 class SupportQuickReplySerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):

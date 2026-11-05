@@ -85,6 +85,14 @@ class SupportMessage(PublicUUIDModel):
         null=True,
         verbose_name=_('Pièce jointe'),
     )
+    reply_to = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='replies',
+        verbose_name=_('Réponse à'),
+    )
     is_read = models.BooleanField(default=False, db_index=True, verbose_name=_('Lu'))
     is_pinned = models.BooleanField(
         default=False,

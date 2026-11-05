@@ -1065,7 +1065,7 @@ class SupportChatView(APIView):
             ).exclude(sender=client).update(is_read=True)
 
         qs = SupportMessage.objects.filter(client=client).select_related(
-            'sender', 'client'
+            'sender', 'client', 'reply_to', 'reply_to__sender'
         )
         unread_count = (
             SupportMessage.objects.filter(
@@ -1082,7 +1082,7 @@ class SupportChatView(APIView):
         is_pinned = bool(getattr(thread_meta, 'is_pinned', False))
         pinned_qs = (
             SupportMessage.objects.filter(client=client, is_pinned=True)
-            .select_related('sender', 'client')
+            .select_related('sender', 'client', 'reply_to', 'reply_to__sender')
             .order_by('-pinned_at', '-created_at')[:20]
         )
         # Limite les threads longs : dernières N messages (ordre chronologique).
@@ -1138,6 +1138,26 @@ class SupportChatView(APIView):
         if len(body) < 1 and attachment is None:
             return Response({'detail': 'Message vide.'}, status=400)
 
+        reply_to = None
+        raw_reply = (
+            request.data.get('reply_to')
+            or request.data.get('reply_to_id')
+            or ''
+        )
+        raw_reply = str(raw_reply).strip()
+        if raw_reply:
+            try:
+                candidate = resolve_uuid_or_pk(
+                    SupportMessage.objects.filter(client=client),
+                    raw_reply,
+                )
+                reply_to = candidate
+            except SupportMessage.DoesNotExist:
+                return Response(
+                    {'detail': 'Message cité introuvable.'},
+                    status=400,
+                )
+
         if is_app_admin(request.user):
             SupportMessage.objects.filter(
                 client=client, sender=client, is_read=False
@@ -1152,6 +1172,7 @@ class SupportChatView(APIView):
             sender=request.user,
             body=body[:4000],
             attachment=attachment,
+            reply_to=reply_to,
             is_read=False,
         )
 
@@ -1218,6 +1239,11 @@ class SupportChatView(APIView):
         except Exception:
             pass
 
+        msg = (
+            SupportMessage.objects.select_related(
+                'sender', 'client', 'reply_to', 'reply_to__sender'
+            ).get(pk=msg.pk)
+        )
         return Response(
             SupportMessageSerializer(msg, context={'request': request}).data,
             status=201,

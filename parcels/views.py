@@ -12,8 +12,9 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django.db import transaction # Pour les opérations atomiques
-from django.db.models import Prefetch
+from django.db.models import Exists, OuterRef, Prefetch
 from django.http import Http404
+from payments.models import Payment
 from .models import Order, Parcel, ParcelImage, Consolidation, OrderImage, ImportBatch, ShipmentBatch, ExpeditionRequest
 from .serializers import (
     OrderSerializer,
@@ -220,7 +221,22 @@ class OrderListCreateView(generics.ListCreateAPIView):
 
         status_filter = (self.request.query_params.get('status') or '').strip().lower()
         if status_filter and status_filter != 'all':
-            queryset = queryset.filter(status=status_filter)
+            if status_filter in {'needs_quote', 'devis', 'awaiting_quote'}:
+                # Pas encore de devis établi (hors annulées).
+                queryset = queryset.filter(quote_ready=False).exclude(
+                    status='cancelled'
+                )
+            elif status_filter in {'validated', 'paid_validated', 'commande_validee'}:
+                # Commande validée après paiement client.
+                paid_qs = Payment.objects.filter(
+                    order_id=OuterRef('pk'),
+                    status='completed',
+                )
+                queryset = queryset.annotate(
+                    _has_completed_payment=Exists(paid_qs),
+                ).filter(_has_completed_payment=True)
+            else:
+                queryset = queryset.filter(status=status_filter)
         return queryset
 
     def perform_create(self, serializer):

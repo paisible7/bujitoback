@@ -17,12 +17,71 @@ logger = logging.getLogger(__name__)
 def _parcel_pre_save(sender, instance: Parcel, **kwargs):
     if not instance.pk:
         instance._old_status = None
+        instance._old_description = None
         return
     try:
-        old = Parcel.objects.only("status").get(pk=instance.pk)
+        old = Parcel.objects.only("status", "description").get(pk=instance.pk)
         instance._old_status = old.status
+        instance._old_description = old.description
     except Parcel.DoesNotExist:
         instance._old_status = None
+        instance._old_description = None
+
+
+def _parcel_content_label(parcel: Parcel) -> str:
+    raw = (parcel.description or "").strip()
+    return raw if raw else "non précisé"
+
+
+def _notify_client_parcel_content(
+    parcel: Parcel,
+    *,
+    title: str,
+    intro: str,
+    action: str,
+    user=None,
+) -> None:
+    """Notifie le client du contenu enregistré + invitation à faire corriger."""
+    from .ownership import resolve_parcel_owner
+
+    tracking = parcel.tracking_number or str(parcel.pk)
+    owner = user or resolve_parcel_owner(parcel)
+    if owner is None:
+        return
+    content = _parcel_content_label(parcel)
+    extras = []
+    if parcel.weight_kg is not None and parcel.weight_kg > 0:
+        extras.append(f"poids {parcel.weight_kg} kg")
+    if parcel.volume_cbm is not None and parcel.volume_cbm > 0:
+        extras.append(f"volume {parcel.volume_cbm} m³")
+    extras_txt = f" ({', '.join(extras)})" if extras else ""
+    body = (
+        f"{intro} Contenu enregistré : {content}{extras_txt}. "
+        "Si ce n'est pas exact, ouvrez le suivi du colis et demandez "
+        "une modification au support."
+    )
+    try:
+        send_fcm_notification(
+            owner,
+            title,
+            body,
+            type="parcel",
+            reference_id=parcel.pk,
+            data={
+                "type": "parcel",
+                "reference_id": str(parcel.pk),
+                "action": action,
+                "tracking_number": tracking,
+                "description": content,
+            },
+            translate=False,
+        )
+    except Exception:
+        logger.exception(
+            "Échec notification client contenu colis %s (%s)",
+            parcel.pk,
+            action,
+        )
 
 
 def _notify_warehouse_arrival(parcel: Parcel, *, user=None) -> None:
@@ -39,29 +98,16 @@ def _notify_warehouse_arrival(parcel: Parcel, *, user=None) -> None:
         or "—"
     )
     if owner is not None:
-        try:
-            send_fcm_notification(
-                owner,
-                "Colis arrivé à l'entrepôt",
-                (
-                    f"Votre colis {tracking} a été réceptionné à l'entrepôt "
-                    "et peut maintenant être groupé."
-                ),
-                type="parcel",
-                reference_id=parcel.pk,
-                data={
-                    "type": "parcel",
-                    "reference_id": str(parcel.pk),
-                    "action": "arrived",
-                    "tracking_number": tracking,
-                },
-                translate=False,
-            )
-        except Exception:
-            logger.exception(
-                "Échec notification client arrivée entrepôt colis %s",
-                parcel.pk,
-            )
+        _notify_client_parcel_content(
+            parcel,
+            title="Colis arrivé à l'entrepôt",
+            intro=(
+                f"Votre colis {tracking} a été réceptionné à l'entrepôt "
+                "et peut maintenant être groupé."
+            ),
+            action="arrived",
+            user=owner,
+        )
     try:
         notify_admins(
             "Colis arrivé à l'entrepôt",
@@ -90,7 +136,15 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
         sync_order_status_by_id(instance.order_id)
 
     old_status = getattr(instance, "_old_status", None)
-    if not created and old_status == instance.status:
+    old_description = getattr(instance, "_old_description", None)
+    new_description = (instance.description or "").strip()
+    old_description_norm = (old_description or "").strip()
+    description_changed = (
+        not created and old_description_norm != new_description and bool(new_description)
+    )
+    status_changed = created or old_status != instance.status
+
+    if not created and not status_changed and not description_changed:
         return
 
     tracking = instance.tracking_number or str(instance.pk)
@@ -105,6 +159,17 @@ def _parcel_post_save(sender, instance: Parcel, created: bool, **kwargs):
     ) or (created and instance.status == "pending")
     if is_arrival:
         _notify_warehouse_arrival(instance)
+        return
+
+    if description_changed:
+        _notify_client_parcel_content(
+            instance,
+            title="Contenu du colis mis à jour",
+            intro=f"Le contenu de votre colis {tracking} a été modifié.",
+            action="content_updated",
+        )
+
+    if not status_changed:
         return
 
     user = resolve_parcel_owner(instance)
