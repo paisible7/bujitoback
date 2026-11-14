@@ -32,7 +32,9 @@ from .serializers import (
 from .expedition_utils import (
     build_expedition_quote,
     parcel_volume_cbm,
+    parcels_content_undetermined,
     parcels_shipping_category,
+    CONTENT_UNDETERMINED_BLOCK_MSG,
 )
 from .ownership import parcels_for_user_q, user_owns_parcel
 from users.permissions import IsAdminUser
@@ -219,19 +221,39 @@ class OrderListCreateView(generics.ListCreateAPIView):
         else:
             queryset = queryset.filter(user=self.request.user)
 
+        # Écran admin commandes : uniquement le cycle devis → à commander → commandé.
+        # (pas les statuts colis auto : en traitement / expédié / livré)
         status_filter = (self.request.query_params.get('status') or '').strip().lower()
         if status_filter and status_filter != 'all':
+            paid_qs = Payment.objects.filter(
+                order_id=OuterRef('pk'),
+                status='completed',
+            )
             if status_filter in {'needs_quote', 'devis', 'awaiting_quote'}:
-                # Pas encore de devis établi (hors annulées).
                 queryset = queryset.filter(quote_ready=False).exclude(
                     status='cancelled'
                 )
-            elif status_filter in {'validated', 'paid_validated', 'commande_validee'}:
-                # Commande validée après paiement client.
-                paid_qs = Payment.objects.filter(
-                    order_id=OuterRef('pk'),
-                    status='completed',
+            elif status_filter in {
+                'to_order',
+                'a_commander',
+                'awaiting_payment',
+            }:
+                # Devis fait, en attente paiement client.
+                queryset = (
+                    queryset.filter(quote_ready=True)
+                    .exclude(status='cancelled')
+                    .annotate(_has_completed_payment=Exists(paid_qs))
+                    .filter(_has_completed_payment=False)
                 )
+            elif status_filter in {
+                'ordered',
+                'commande',
+                'commanded',
+                'validated',
+                'paid_validated',
+                'commande_validee',
+            }:
+                # Payée par le client (= commandée).
                 queryset = queryset.annotate(
                     _has_completed_payment=Exists(paid_qs),
                 ).filter(_has_completed_payment=True)
@@ -1029,12 +1051,22 @@ class ConsolidationDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
 
         if admin:
             return obj
-        # Client propriétaire : peut modifier tant que non annulé
-        # (avant confirmation, après devis, ou après acceptation).
-        if is_owner and obj.status != 'cancelled':
+        # Client : édition seulement avant acceptation du groupage.
+        if is_owner and obj.status in ('pending', 'processing'):
             return obj
         self.permission_denied(self.request)
         return obj
+
+    @staticmethod
+    def _consolidation_sent_to_other_forwarder(instance):
+        """True si un colis du groupage est déjà parti vers un autre transitaire."""
+        from .models import ExpeditionRequest
+
+        return ExpeditionRequest.objects.filter(
+            parcels__in=instance.parcels.all(),
+            mode='other_forwarder',
+            status__in=['paid', 'shipped'],
+        ).exists()
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -1042,6 +1074,36 @@ class ConsolidationDetailView(UUIDLookupMixin, generics.RetrieveUpdateAPIView):
         serializer_class = self.get_serializer_class()
 
         if serializer_class is ConsolidationClientUpdateSerializer:
+            if instance.status == 'completed':
+                return Response(
+                    {
+                        "detail": (
+                            "Ce groupage a déjà été accepté et ne peut "
+                            "plus être modifié."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if instance.status == 'cancelled':
+                return Response(
+                    {
+                        "detail": (
+                            "Ce groupage est annulé et ne peut plus "
+                            "être modifié."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if self._consolidation_sent_to_other_forwarder(instance):
+                return Response(
+                    {
+                        "detail": (
+                            "Ce groupage a déjà été envoyé vers votre "
+                            "transitaire et ne peut plus être modifié."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             serializer = ConsolidationClientUpdateSerializer(
                 instance,
                 data=request.data,
@@ -1627,6 +1689,12 @@ def _expedition_quote_or_create(request, *, create: bool):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if parcels_content_undetermined(parcels):
+        return Response(
+            {"detail": CONTENT_UNDETERMINED_BLOCK_MSG},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     if not admin:
         for parcel in parcels:
             if not user_owns_parcel(request.user, parcel):
@@ -1996,18 +2064,25 @@ class ExpeditionDetailView(APIView):
                 send_fcm_notification(
                     exp.user,
                     "Colis envoyé vers votre transitaire",
-                    f"N° de suivi : {tracking}. Réf. expédition #{exp.pk}.",
+                    (
+                        f"Votre colis a été transmis à votre transitaire. "
+                        f"N° de suivi d'envoi : {tracking}."
+                    ),
                     type="expedition",
                     reference_id=exp.pk,
                     data={
                         "type": "expedition",
                         "expedition_id": str(exp.pk),
                         "outbound_tracking_number": tracking,
+                        "action": "forwarder_shipped",
                     },
                     translate=False,
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "Échec notification client envoi transitaire expédition #%s",
+                    exp.pk,
+                )
             return Response(ExpeditionRequestSerializer(exp).data)
 
         # Fixer les frais de transfert → paiement client.

@@ -42,6 +42,7 @@ def _notify_client_parcel_content(
     user=None,
 ) -> None:
     """Notifie le client du contenu enregistré + invitation à faire corriger."""
+    from .expedition_utils import parcel_content_undetermined
     from .ownership import resolve_parcel_owner
 
     tracking = parcel.tracking_number or str(parcel.pk)
@@ -49,17 +50,27 @@ def _notify_client_parcel_content(
     if owner is None:
         return
     content = _parcel_content_label(parcel)
-    extras = []
-    if parcel.weight_kg is not None and parcel.weight_kg > 0:
-        extras.append(f"poids {parcel.weight_kg} kg")
-    if parcel.volume_cbm is not None and parcel.volume_cbm > 0:
-        extras.append(f"volume {parcel.volume_cbm} m³")
-    extras_txt = f" ({', '.join(extras)})" if extras else ""
-    body = (
-        f"{intro} Contenu enregistré : {content}{extras_txt}. "
-        "Si ce n'est pas exact, ouvrez le suivi du colis et demandez "
-        "une modification au support."
-    )
+    if parcel_content_undetermined(parcel):
+        title = "Contenu du colis à déterminer"
+        body = (
+            f"Colis {tracking} : veuillez déterminer le contenu du colis "
+            "auprès de l'admin ou du service client. "
+            "Le paiement et l'expédition restent bloqués tant que le "
+            "contenu n'est pas précisé."
+        )
+        action = "content_undetermined"
+    else:
+        extras = []
+        if parcel.weight_kg is not None and parcel.weight_kg > 0:
+            extras.append(f"poids {parcel.weight_kg} kg")
+        if parcel.volume_cbm is not None and parcel.volume_cbm > 0:
+            extras.append(f"volume {parcel.volume_cbm} m³")
+        extras_txt = f" ({', '.join(extras)})" if extras else ""
+        body = (
+            f"{intro} Contenu enregistré : {content}{extras_txt}. "
+            "Si ce n'est pas exact, ouvrez le suivi du colis et demandez "
+            "une modification au support."
+        )
     try:
         send_fcm_notification(
             owner,
@@ -331,19 +342,9 @@ def _order_post_save(sender, instance: Order, created: bool, **kwargs):
         )
         return
 
-    if old_status == instance.status:
-        return
-
-    title = "Mise a jour commande"
-    body = f"Votre commande #{instance.pk} est maintenant: {instance.get_status_display()}"
-    send_fcm_notification(
-        user,
-        title,
-        body,
-        type="order",
-        reference_id=instance.pk,
-        data={"type": "order", "reference_id": instance.pk},
-    )
+    # Pas de notif sur les changements de statut auto (colis / enregistrement
+    # manuel admin → en traitement, expédié, livré, etc.).
+    return
 
 
 def _consolidation_ref_id(group: Consolidation):

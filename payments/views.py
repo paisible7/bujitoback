@@ -458,6 +458,16 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     {"message": "Cette expédition n'est plus payable."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            from parcels.expedition_utils import (
+                CONTENT_UNDETERMINED_BLOCK_MSG,
+                parcels_content_undetermined,
+            )
+
+            if parcels_content_undetermined(list(expedition.parcels.all())):
+                return Response(
+                    {"message": CONTENT_UNDETERMINED_BLOCK_MSG},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if expedition.total_due_now <= 0:
                 return Response(
                     {"message": "Montant d'expédition invalide."},

@@ -151,15 +151,14 @@ class ParcelSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
             manager = getattr(obj, 'expeditions', None)
             if manager is None:
                 return None
-            exp = (
-                manager.filter(
-                    mode='other_forwarder',
-                    status='shipped',
-                )
+            qs = (
+                manager.filter(mode='other_forwarder')
                 .exclude(outbound_tracking_number='')
-                .order_by('-shipped_at', '-created_at')
-                .first()
+                .exclude(outbound_tracking_number__isnull=True)
+                .order_by('-shipped_at', '-paid_at', '-created_at')
             )
+            # Préférer une expédition déjà expédiée / payée.
+            exp = qs.filter(status__in=['shipped', 'paid']).first() or qs.first()
             if not exp:
                 return None
             return (exp.outbound_tracking_number or '').strip() or None

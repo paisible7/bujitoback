@@ -95,11 +95,41 @@ def cbm_cost(
     }
 
 
+def parcel_content_undetermined(parcel) -> bool:
+    """True si l'admin a enregistré « contenu non déterminé »."""
+    raw = (getattr(parcel, "description", None) or "").strip().lower()
+    if not raw:
+        return False
+    if raw in {"content_undetermined", "undetermined"}:
+        return True
+    needles = (
+        "non déterminé",
+        "non determine",
+        "undetermined",
+        "contenu non",
+        "content undetermined",
+    )
+    return any(k in raw for k in needles)
+
+
+def parcels_content_undetermined(parcels: list) -> bool:
+    return any(parcel_content_undetermined(p) for p in parcels)
+
+
+CONTENT_UNDETERMINED_BLOCK_MSG = (
+    "Le contenu de ce colis n'est pas encore déterminé. "
+    "Contactez l'admin ou le service client avant de pouvoir "
+    "payer ou expédier."
+)
+
+
 def parcel_shipping_category(parcel) -> str:
     """Catégorie fixée à l'enregistrement admin (description du colis)."""
     raw = (getattr(parcel, "description", None) or "").strip().lower()
     if not raw:
         return "ordinary"
+    if parcel_content_undetermined(parcel):
+        return "content_undetermined"
     if raw in {
         "ordinary",
         "sensitive",
@@ -108,6 +138,7 @@ def parcel_shipping_category(parcel) -> str:
         "express",
         "electronics_battery",
         "fragile_extra",
+        "content_undetermined",
     }:
         return raw
     if any(k in raw for k in ("ordinateur", "computer", "laptop", "notebook")):
@@ -137,9 +168,10 @@ def parcel_shipping_category(parcel) -> str:
 
 
 def parcels_shipping_category(parcels: list) -> str:
-    """Priorité : computer > electronics > fragile > phone > sensitive > express > ordinary."""
+    """Priorité : undetermined > computer > electronics > fragile > phone > sensitive > express > ordinary."""
     cats = {parcel_shipping_category(p) for p in parcels}
     for key in (
+        "content_undetermined",
         "computer",
         "electronics_battery",
         "fragile_extra",
