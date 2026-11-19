@@ -311,8 +311,9 @@ class ParcelProvisioningTests(TestCase):
             set(order.parcels.values_list("status", flat=True)),
             {"awaiting_arrival"},
         )
+        # Commander ne génère plus de n° de suivi automatiquement.
         self.assertEqual(
-            order.parcels.values("tracking_number").distinct().count(),
+            order.parcels.filter(tracking_number__isnull=True).count(),
             3,
         )
         order.refresh_from_db()
@@ -378,6 +379,10 @@ class ParcelProvisioningTests(TestCase):
             expected_parcel_count=2,
         )
         provision_order_parcels(order.pk, notify=False)
+        # Attribution des n° à l'arrivée (plus de génération auto au paiement).
+        for index, parcel in enumerate(order.parcels.order_by("order_sequence"), start=1):
+            parcel.tracking_number = f"BUJ-GROUP-{index}"
+            parcel.save(update_fields=["tracking_number"])
         tracking_numbers = list(
             order.parcels.values_list("tracking_number", flat=True)
         )
@@ -414,7 +419,7 @@ class ParcelProvisioningTests(TestCase):
         )
         provision_order_parcels(order.pk, notify=False)
         generated = order.parcels.get(order_sequence=1)
-        internal_tracking = generated.tracking_number
+        self.assertIsNone(generated.tracking_number)
         client = APIClient()
         client.force_authenticate(admin)
 
@@ -436,11 +441,8 @@ class ParcelProvisioningTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(order.parcels.count(), 2)
         generated.refresh_from_db()
-        self.assertEqual(generated.tracking_number, internal_tracking)
-        self.assertEqual(
-            generated.supplier_tracking_number,
-            "SUPPLIER-TRACK-001",
-        )
+        self.assertEqual(generated.tracking_number, "SUPPLIER-TRACK-001")
+        self.assertFalse(generated.supplier_tracking_number)
         self.assertEqual(generated.status, "pending")
 
 

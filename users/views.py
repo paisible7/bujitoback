@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-from django.db.models import Q, Count, Prefetch
+from django.db.models import Q, Count, Exists, OuterRef, Prefetch
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
@@ -135,12 +135,9 @@ class UserProfileView(APIView):
         from parcels.models import ExpeditionRequest, Order, Parcel
         from parcels.ownership import parcels_for_user_q
         from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
+        from payments.models import Payment
 
-        user = (
-            User.objects.filter(pk=request.user.pk)
-            .annotate(orders_count=Count('orders', distinct=True))
-            .first()
-        ) or request.user
+        user = User.objects.filter(pk=request.user.pk).first() or request.user
         visible = Parcel.objects.filter(
             parcels_for_user_q(request.user)
         ).distinct()
@@ -151,8 +148,18 @@ class UserProfileView(APIView):
         user.parcels_sent_count = visible.filter(
             status__in=PARCEL_SENT_STATUSES
         ).count()
-        if not hasattr(user, 'orders_count'):
-            user.orders_count = request.user.orders.count()
+
+        # Commandes dashboard : ouvertes seulement (baisse quand validée/payée).
+        paid_order = Payment.objects.filter(
+            order_id=OuterRef('pk'),
+            status='completed',
+        )
+        user.orders_count = (
+            Order.objects.filter(user_id=request.user.pk)
+            .exclude(status='cancelled')
+            .exclude(Exists(paid_order))
+            .count()
+        )
 
         unpaid_orders = (
             Order.objects.filter(
@@ -160,8 +167,7 @@ class UserProfileView(APIView):
                 quote_ready=True,
                 status__in=('pending', 'processing'),
             )
-            .exclude(payments__status='completed')
-            .distinct()
+            .exclude(Exists(paid_order))
             .count()
         )
         unpaid_expeditions = ExpeditionRequest.objects.filter(

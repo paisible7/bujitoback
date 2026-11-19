@@ -41,6 +41,8 @@ class PaymentSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
     recharge_amount = serializers.SerializerMethodField()
     recharge_fee = serializers.SerializerMethodField()
     recharge_fee_rate = serializers.SerializerMethodField()
+    money_transfer_fee = serializers.SerializerMethodField()
+    money_transfer_fee_rate = serializers.SerializerMethodField()
     service_amount = serializers.SerializerMethodField()
     processing_fee = serializers.SerializerMethodField()
     processing_fee_rate = serializers.SerializerMethodField()
@@ -73,6 +75,8 @@ class PaymentSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
             'recharge_amount',
             'recharge_fee',
             'recharge_fee_rate',
+            'money_transfer_fee',
+            'money_transfer_fee_rate',
             'service_amount',
             'processing_fee',
             'processing_fee_rate',
@@ -160,6 +164,12 @@ class PaymentSerializer(PublicUUIDSerializerMixin, serializers.ModelSerializer):
 
     def get_recharge_fee_rate(self, obj):
         return _payment_meta(obj).get('recharge_fee_rate')
+
+    def get_money_transfer_fee(self, obj):
+        return _payment_meta(obj).get('money_transfer_fee')
+
+    def get_money_transfer_fee_rate(self, obj):
+        return _payment_meta(obj).get('money_transfer_fee_rate')
 
     def get_service_amount(self, obj):
         meta = _payment_meta(obj)

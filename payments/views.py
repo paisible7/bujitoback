@@ -105,9 +105,11 @@ def _with_processing_fee(service_amount: Decimal, meta: dict | None = None):
         rounding=ROUND_HALF_UP,
     )
     total = service_amount + fee
+    # Ne pas écraser service_amount s'il a déjà été fixé (ex. montant hors frais transfert).
+    if "service_amount" not in meta:
+        meta["service_amount"] = str(service_amount)
     meta.update(
         {
-            "service_amount": str(service_amount),
             "processing_fee": str(fee),
             "processing_fee_rate": str(fee_rate),
         }

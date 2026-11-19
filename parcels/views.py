@@ -766,6 +766,8 @@ class ParcelDetailView(generics.RetrieveUpdateDestroyAPIView):
         obj = qs.filter(tracking_number=key).first()
         if obj is None:
             obj = qs.filter(supplier_tracking_number__iexact=key).first()
+        if obj is None and key and str(key).isdigit():
+            obj = qs.filter(pk=int(key)).first()
         if obj is None:
             raise Http404("Colis non trouvé.")
         if is_app_admin(self.request.user):
@@ -1257,6 +1259,9 @@ class ParcelBulkImportView(APIView):
                             order=order,
                             order_sequence=order_sequence,
                         )
+                    elif tracking and not parcel.tracking_number:
+                        # Placeholder commande sans n° : le n° importé devient le suivi.
+                        parcel.tracking_number = tracking
                     elif (
                         tracking
                         and tracking != parcel.tracking_number

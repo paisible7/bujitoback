@@ -193,8 +193,21 @@ class UserSerializer(serializers.ModelSerializer):
         from parcels.stats import PARCEL_RECEIVED_STATUSES, PARCEL_SENT_STATUSES
 
         data = super().to_representation(instance)
-        if not hasattr(instance, 'orders_count'):
-            data['orders_count'] = instance.orders.count()
+        if 'orders_count' not in data or data.get('orders_count') is None:
+            from django.db.models import Exists, OuterRef
+            from parcels.models import Order
+            from payments.models import Payment
+
+            paid_order = Payment.objects.filter(
+                order_id=OuterRef('pk'),
+                status='completed',
+            )
+            data['orders_count'] = (
+                Order.objects.filter(user_id=instance.pk)
+                .exclude(status='cancelled')
+                .exclude(Exists(paid_order))
+                .count()
+            )
         if not hasattr(instance, 'parcels_count'):
             data['parcels_count'] = Parcel.objects.filter(
                 order__user_id=instance.pk
@@ -210,16 +223,21 @@ class UserSerializer(serializers.ModelSerializer):
                 status__in=PARCEL_SENT_STATUSES,
             ).count()
         if not hasattr(instance, 'invoices_to_pay_count'):
+            from django.db.models import Exists, OuterRef
             from parcels.models import ExpeditionRequest, Order
+            from payments.models import Payment
 
+            paid_order = Payment.objects.filter(
+                order_id=OuterRef('pk'),
+                status='completed',
+            )
             unpaid_orders = (
                 Order.objects.filter(
                     user_id=instance.pk,
                     quote_ready=True,
                     status__in=('pending', 'processing'),
                 )
-                .exclude(payments__status='completed')
-                .distinct()
+                .exclude(Exists(paid_order))
                 .count()
             )
             unpaid_expeditions = ExpeditionRequest.objects.filter(

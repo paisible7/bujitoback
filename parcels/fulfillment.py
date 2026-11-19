@@ -8,7 +8,6 @@ from notifications.utils import notify_admins, send_fcm_notification
 
 from .models import Order, Parcel
 from .order_status import sync_order_status
-from .tracking_utils import generate_tracking_number
 
 
 @dataclass(frozen=True)
@@ -17,21 +16,12 @@ class ProvisioningResult:
     created_count: int
 
 
-def _generate_tracking_number(order: Order, sequence: int) -> str:
-    """N° de suivi client : BUJ + 4 derniers chiffres du téléphone."""
-    phone = (order.client_phone or getattr(order.user, "phone_number", None) or "").strip()
-    return generate_tracking_number(
-        order_id=order.pk,
-        sequence=sequence,
-        client_phone=phone or None,
-    )
-
 def _notify_provisioning(
     *,
     order_id: int,
     user_id: int,
     user_email: str,
-    tracking_numbers: tuple[str, ...],
+    created_count: int,
 ) -> None:
     from users.models import CustomUser
 
@@ -39,14 +29,12 @@ def _notify_provisioning(
     if user is None:
         return
 
-    count = len(tracking_numbers)
-    tracking_list = ", ".join(tracking_numbers)
     send_fcm_notification(
         user,
         "Paiement confirmé",
         (
             f"Votre paiement pour la commande #{order_id} est confirmé. "
-            f"{count} colis ont été créés : {tracking_list}."
+            f"{created_count} colis sont en attente d'arrivée à l'entrepôt."
         ),
         type="order",
         reference_id=order_id,
@@ -59,8 +47,8 @@ def _notify_provisioning(
     notify_admins(
         "Colis créés après paiement",
         (
-            f"{count} colis ont été générés pour la commande #{order_id} "
-            f"de {user_email} : {tracking_list}."
+            f"{created_count} colis placeholder ont été créés pour la commande "
+            f"#{order_id} de {user_email} (sans n° de suivi — à attribuer à l'arrivée)."
         ),
         type="order",
         reference_id=order_id,
@@ -103,10 +91,11 @@ def provision_order_parcels(
         for sequence in range(1, expected_count + 1):
             parcel = existing_by_sequence.get(sequence)
             if parcel is None:
+                # Pas de n° de suivi auto : attribué à l'arrivée / import / saisie admin.
                 parcel = Parcel.objects.create(
                     order=order,
                     order_sequence=sequence,
-                    tracking_number=_generate_tracking_number(order, sequence),
+                    tracking_number=None,
                     status="awaiting_arrival",
                     current_location="En attente d'arrivée à l'entrepôt",
                     client_name=order.client_name or order.user.full_name or order.user.email,
@@ -118,18 +107,14 @@ def provision_order_parcels(
 
         sync_order_status(order)
 
-        tracking_numbers = tuple(
-            parcel.tracking_number
-            for parcel in parcels
-            if parcel.tracking_number
-        )
         if created_count and notify:
+            notify_count = created_count
             transaction.on_commit(
                 lambda: _notify_provisioning(
                     order_id=order.pk,
                     user_id=order.user_id,
                     user_email=order.user.email,
-                    tracking_numbers=tracking_numbers,
+                    created_count=notify_count,
                 ),
                 robust=True,
             )

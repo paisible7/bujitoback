@@ -514,12 +514,29 @@ def build_receipt_pdf(payment) -> bytes:
     if tracking:
         service_rows.append(("Référence / suivi :", tracking))
     service_rows.extend(_extra_service_rows(meta))
-    service_rows.extend(
-        [
-            ("Montant :", _money(service_amount, payment.currency)),
-            ("Frais de traitement :", _money(fee, payment.currency)),
-        ]
-    )
+    service_rows.append(("Montant :", _money(service_amount, payment.currency)))
+    transfer_fee_raw = meta.get("money_transfer_fee")
+    try:
+        transfer_fee = Decimal(str(transfer_fee_raw or "0"))
+    except Exception:
+        transfer_fee = Decimal("0")
+    if transfer_fee > 0:
+        rate = meta.get("money_transfer_fee_rate") or ""
+        label = "Frais de transfert :"
+        if rate not in (None, ""):
+            label = f"Frais de transfert ({rate} %) :"
+        service_rows.append((label, _money(transfer_fee, payment.currency)))
+    # Frais gateway (ou recharge) restants après le frais de transfert.
+    gateway_fee = fee
+    if transfer_fee > 0:
+        try:
+            gateway_fee = Decimal(str(meta.get("processing_fee") or "0"))
+        except Exception:
+            gateway_fee = fee
+    if gateway_fee > 0:
+        service_rows.append(
+            ("Frais de traitement :", _money(gateway_fee, payment.currency))
+        )
     _kv_block(
         "DÉTAIL DU SERVICE",
         service_rows,
