@@ -80,6 +80,8 @@ def resolve_country_and_currency(currency: str | None) -> tuple[str, str]:
         return "CN", "CNY"
     if code == "GBP":
         return "GB", "GBP"
+    if code == "EUR":
+        return "FR", "EUR"
     # USD (commandes / expéditions) → pays RDC
     return "CD", "USD"
 

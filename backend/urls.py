@@ -7,7 +7,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
-from users.views import CustomTokenObtainPairView
+from users.views import CustomTokenObtainPairView, GoogleLoginView
 from notifications.views import NotificationViewSet
 from reports.views import (
     SupportChatView,
@@ -23,6 +23,7 @@ urlpatterns = [
 
     # Authentification JWT
     path('api/auth/login/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/auth/google/', GoogleLoginView.as_view(), name='auth_google'),
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 
     # Utilisateurs

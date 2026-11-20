@@ -127,6 +127,156 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         return response
 
 
+def _jwt_auth_payload(user) -> dict:
+    """Réponse commune login / register / Google."""
+    refresh = RefreshToken.for_user(user)
+    return {
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
+        'email': user.email,
+        'role': normalize_role(user.role),
+        'full_name': user.full_name,
+        'phone_number': user.phone_number,
+        'city': getattr(user, 'city', '') or '',
+        'stars': getattr(user, 'stars', 0) or 0,
+        'admin_permissions': normalize_admin_permissions(
+            getattr(user, 'admin_permissions', None)
+        ),
+        'china_warehouse_address': build_china_warehouse_address(
+            user.full_name,
+            user.phone_number,
+            getattr(user, 'city', '') or '',
+        ),
+        'china_air_address': build_china_air_address(
+            user.full_name,
+            user.phone_number,
+            getattr(user, 'city', '') or '',
+        ),
+        'china_sea_address': build_china_sea_address(
+            user.full_name,
+            user.phone_number,
+            getattr(user, 'city', '') or '',
+        ),
+    }
+
+
+class GoogleLoginView(APIView):
+    """
+    Connexion / inscription via Google ID token (Sign-In).
+    Body: { "id_token": "..." }
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        from django.conf import settings
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token as google_id_token
+
+        raw_token = (
+            request.data.get('id_token')
+            or request.data.get('idToken')
+            or ''
+        ).strip()
+        if not raw_token:
+            return Response(
+                {'message': 'id_token is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        audiences = list(getattr(settings, 'GOOGLE_OAUTH_CLIENT_IDS', []) or [])
+        if not audiences:
+            return Response(
+                {
+                    'message': (
+                        'Google Sign-In non configuré côté serveur '
+                        '(GOOGLE_OAUTH_CLIENT_IDS).'
+                    )
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            idinfo = None
+            last_error = None
+            for audience in audiences:
+                try:
+                    idinfo = google_id_token.verify_oauth2_token(
+                        raw_token,
+                        google_requests.Request(),
+                        audience,
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 — essayer chaque audience
+                    last_error = exc
+            if idinfo is None:
+                raise last_error or ValueError('invalid token')
+        except Exception as exc:  # noqa: BLE001
+            print(f'[auth/google] token invalid: {exc}')
+            return Response(
+                {'message': 'Jeton Google invalide ou expiré.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if idinfo.get('iss') not in {
+            'accounts.google.com',
+            'https://accounts.google.com',
+        }:
+            return Response(
+                {'message': 'Émetteur Google invalide.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        if not idinfo.get('email'):
+            return Response(
+                {'message': 'Le compte Google ne fournit pas d\'e-mail.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if idinfo.get('email_verified') is False:
+            return Response(
+                {'message': 'E-mail Google non vérifié.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = str(idinfo['email']).strip().lower()
+        full_name = (
+            (idinfo.get('name') or '').strip()
+            or f"{idinfo.get('given_name', '')} {idinfo.get('family_name', '')}".strip()
+        )
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email).first()
+        created = False
+        if user is None:
+            user = User.objects.create_user(
+                email=email,
+                password=None,
+                role=ROLE_CLIENT,
+                full_name=full_name,
+                phone_number=None,
+                city='',
+            )
+            user.set_unusable_password()
+            user.is_active = True
+            user.save()
+            created = True
+        else:
+            if not user.is_active:
+                return Response(
+                    {'message': 'Ce compte est désactivé.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            # Enrichir le nom s'il était vide.
+            if full_name and not (user.full_name or '').strip():
+                user.full_name = full_name
+                user.save(update_fields=['full_name'])
+
+        payload = _jwt_auth_payload(user)
+        payload['created'] = created
+        return Response(
+            payload,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
 class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [JSONParser, FormParser, MultiPartParser]

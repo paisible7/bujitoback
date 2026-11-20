@@ -59,6 +59,7 @@ def _fx_rates():
         'FCFA': Decimal('600'),
         'XOF': Decimal('600'),
         'CNY': Decimal('6.3'),
+        'EUR': Decimal('0.92'),
     }
     try:
         from pricing.models import BusinessSettings
@@ -73,6 +74,8 @@ def _fx_rates():
             rates['XOF'] = _d(s.usd_to_xof)
         if getattr(s, 'usd_to_cny', None) and s.usd_to_cny > 0:
             rates['CNY'] = _d(s.usd_to_cny)
+        if getattr(s, 'usd_to_eur', None) and s.usd_to_eur > 0:
+            rates['EUR'] = _d(s.usd_to_eur)
     except Exception:
         pass
     return rates

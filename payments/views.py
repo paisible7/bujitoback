@@ -93,7 +93,82 @@ def _format_payment_amount(amount, currency: str | None) -> str:
         return f"£{value:,.2f}"
     if code == "FCFA":
         return f"{value:,.0f} FCFA".replace(",", " ")
+    if code == "CNY":
+        return f"{value:,.2f} ¥"
+    if code == "EUR":
+        return f"{value:,.2f} €"
     return f"${value:,.2f}"
+
+
+CHECKOUT_CURRENCIES = {"USD", "FCFA", "CDF", "GBP", "CNY", "EUR"}
+
+
+def _normalize_checkout_currency(raw) -> str:
+    """Normalise la devise choisie au checkout (commande / expédition)."""
+    code = (raw or "USD").strip().upper()
+    if code == "XOF":
+        code = "FCFA"
+    if code == "FC":
+        code = "CDF"
+    if code in {"RMB", "YUAN", "¥"}:
+        code = "CNY"
+    if code in {"€"}:
+        code = "EUR"
+    if code in {"$", "US$"}:
+        code = "USD"
+    if code not in CHECKOUT_CURRENCIES:
+        return "USD"
+    return code
+
+
+def _usd_rate_for(currency: str, settings: BusinessSettings | None = None) -> Decimal:
+    """Taux admin : 1 USD → devise (1 pour USD)."""
+    cfg = settings or BusinessSettings.load()
+    code = _normalize_checkout_currency(currency)
+    if code == "USD":
+        return Decimal("1")
+    mapping = {
+        "CDF": cfg.usd_to_cdf,
+        "GBP": cfg.usd_to_gbp,
+        "FCFA": cfg.usd_to_xof,
+        "CNY": getattr(cfg, "usd_to_cny", None),
+        "EUR": getattr(cfg, "usd_to_eur", None),
+    }
+    rate = mapping.get(code) or Decimal("0")
+    try:
+        rate = Decimal(str(rate))
+    except (InvalidOperation, TypeError, ValueError):
+        rate = Decimal("0")
+    return rate if rate > 0 else Decimal("0")
+
+
+def _convert_usd_amount(
+    amount_usd: Decimal,
+    currency: str,
+    settings: BusinessSettings | None = None,
+) -> tuple[Decimal, Decimal, str]:
+    """
+    Convertit un montant USD vers la devise choisie.
+    Retourne (montant_converti, taux, devise_effective).
+    Si le taux admin est absent → reste en USD. CDF/FCFA → entiers.
+    """
+    code = _normalize_checkout_currency(currency)
+    usd = Decimal(str(amount_usd or 0)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    if code == "USD":
+        return usd, Decimal("1"), "USD"
+    rate = _usd_rate_for(code, settings)
+    if rate <= 0:
+        # Taux manquant → rester en USD plutôt que facturer un mauvais montant.
+        return usd, Decimal("1"), "USD"
+    converted = usd * rate
+    if code in {"CDF", "FCFA"}:
+        converted = converted.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    else:
+        converted = converted.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return converted, rate, code
 
 
 def _with_processing_fee(service_amount: Decimal, meta: dict | None = None):
@@ -480,8 +555,13 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     {"message": "Cette expédition est déjà payée."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            service_amount = expedition.total_due_now
-            transfer_currency = "USD"
+            service_usd = Decimal(str(expedition.total_due_now))
+            pricing = BusinessSettings.load()
+            service_amount, fx_rate, transfer_currency = _convert_usd_amount(
+                service_usd,
+                request.data.get("currency") or "USD",
+                pricing,
+            )
             amount, meta = _with_processing_fee(
                 service_amount,
                 {
@@ -490,6 +570,10 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     "mode": expedition.mode,
                     "was_grouped": bool(expedition.was_grouped),
                     "grouping_fee": str(expedition.grouping_fee or Decimal("0.00")),
+                    "amount_usd": str(service_usd),
+                    "service_amount_usd": str(service_usd),
+                    "exchange_rate": str(fx_rate),
+                    "currency": transfer_currency,
                 },
             )
         else:
@@ -518,9 +602,23 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     {"message": "Cette commande est déjà payée."},
                     status=status.HTTP_409_CONFLICT,
                 )
+            service_usd = Decimal(str(order.total_amount))
+            pricing = BusinessSettings.load()
+            service_amount, fx_rate, transfer_currency = _convert_usd_amount(
+                service_usd,
+                request.data.get("currency") or "USD",
+                pricing,
+            )
             amount, meta = _with_processing_fee(
-                order.total_amount,
-                {"type": "order", "order_id": order.pk},
+                service_amount,
+                {
+                    "type": "order",
+                    "order_id": order.pk,
+                    "amount_usd": str(service_usd),
+                    "service_amount_usd": str(service_usd),
+                    "exchange_rate": str(fx_rate),
+                    "currency": transfer_currency,
+                },
             )
 
         # SasPay pour commandes / expéditions / transferts en ligne.
@@ -588,6 +686,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment.method = method
                     payment.phone_number = phone_number or payment.phone_number
                     payment.amount = amount
+                    payment.currency = transfer_currency
                     # Nouvelle tentative → nouvelle session SasPay (lien précédent invalidé).
                     payment.payment_url = None
                     payment.external_id = None
@@ -606,6 +705,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                             "method",
                             "phone_number",
                             "amount",
+                            "currency",
                             "payment_url",
                             "external_id",
                             "provider_raw_response",
@@ -617,7 +717,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                         user=request.user,
                         order=order,
                         amount=amount,
-                        currency="USD",
+                        currency=transfer_currency,
                         method=method,
                         reference=f"PAY-{uuid.uuid4().hex[:10].upper()}",
                         status="pending",
@@ -648,6 +748,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     payment.method = method
                     payment.phone_number = phone_number or payment.phone_number
                     payment.amount = amount
+                    payment.currency = transfer_currency
                     payment.payment_url = None
                     payment.external_id = None
                     if meta:
@@ -664,6 +765,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                             "method",
                             "phone_number",
                             "amount",
+                            "currency",
                             "payment_url",
                             "external_id",
                             "provider_raw_response",
@@ -675,7 +777,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                         user=request.user,
                         expedition=expedition,
                         amount=amount,
-                        currency="USD",
+                        currency=transfer_currency,
                         method=method,
                         reference=f"EXP-{uuid.uuid4().hex[:10].upper()}",
                         status="pending",
@@ -687,7 +789,7 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
                     user=request.user,
                     order=order,
                     amount=amount,
-                    currency=transfer_currency if is_transfer else "USD",
+                    currency=transfer_currency,
                     method=method,
                     reference=f"{'TRF' if is_transfer else 'PAY'}-{uuid.uuid4().hex[:10].upper()}",
                     status="pending",
@@ -837,8 +939,6 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
         from django.http import HttpResponse
         from users.roles import is_app_admin
 
-        from .receipt import build_receipt_pdf
-
         try:
             if is_app_admin(request.user):
                 payment = resolve_uuid_or_pk(Payment.objects.all(), pk)
@@ -857,6 +957,8 @@ class PaymentViewSet(UUIDLookupMixin, viewsets.ReadOnlyModelViewSet):
             )
 
         try:
+            from .receipt import build_receipt_pdf
+
             pdf = build_receipt_pdf(payment)
         except Exception:
             import logging

@@ -507,6 +507,32 @@ class ParcelListCreateView(generics.ListCreateAPIView):
     ]
     pagination_class = OptionalPageNumberPagination
 
+    @staticmethod
+    def _split_search_terms(raw: str) -> list[str]:
+        """Découpe plusieurs n° (espace, virgule, ;, |, /)."""
+        return [t for t in re.split(r'[\s,;|/]+', (raw or '').strip()) if t]
+
+    def filter_queryset(self, queryset):
+        """
+        Multi-numéros : OU sur tracking Bujito / fournisseur / entrepôt.
+        Ex. « 72575 1182 BUJ0091 » → tous les colis matchant au moins un fragment.
+        Un seul terme → SearchFilter classique (tous les champs).
+        """
+        from django.db.models import Q
+
+        search = (self.request.query_params.get('search') or '').strip()
+        terms = self._split_search_terms(search)
+        if len(terms) >= 2:
+            multi = Q()
+            for term in terms:
+                multi |= (
+                    Q(tracking_number__icontains=term)
+                    | Q(supplier_tracking_number__icontains=term)
+                    | Q(warehouse_number__icontains=term)
+                )
+            return queryset.filter(multi).distinct()
+        return super().filter_queryset(queryset)
+
     def get_queryset(self):
         from django.db.models import Q
 

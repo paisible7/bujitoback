@@ -33,6 +33,14 @@ DEBUG = env('DEBUG')
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['127.0.0.1', 'localhost'])
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
+# Client IDs OAuth Google (Web + Android + iOS) pour vérifier les id_token.
+# Ex: "xxx.apps.googleusercontent.com,yyy.apps.googleusercontent.com"
+GOOGLE_OAUTH_CLIENT_IDS = [
+    c.strip()
+    for c in env.list('GOOGLE_OAUTH_CLIENT_IDS', default=[])
+    if str(c).strip()
+]
+
 
 # Application definition
 
