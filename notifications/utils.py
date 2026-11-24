@@ -114,17 +114,28 @@ def send_fcm_notification(
         if image_url:
             notification_kwargs["image"] = image_url
 
-        android_config = None
+        unread = Notification.objects.filter(user=user, is_read=False).count()
+        payload.setdefault("unread_count", str(unread))
+
+        android_notif_kwargs = {
+            # Android 8+ : nombre affiché sur l’icône / dans le tiroir.
+            "notification_count": unread,
+        }
         if image_url:
-            android_config = messaging.AndroidConfig(
-                notification=messaging.AndroidNotification(image=image_url),
-            )
+            android_notif_kwargs["image"] = image_url
 
         message = messaging.MulticastMessage(
             notification=messaging.Notification(**notification_kwargs),
             data=payload,
             tokens=tokens,
-            android=android_config,
+            android=messaging.AndroidConfig(
+                notification=messaging.AndroidNotification(**android_notif_kwargs),
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(badge=unread, sound="default"),
+                ),
+            ),
         )
 
         # 4. Envoyer via Firebase hors requête HTTP (sinon le devis timeout).

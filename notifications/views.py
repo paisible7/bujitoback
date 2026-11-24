@@ -40,6 +40,20 @@ class NotificationViewSet(UUIDLookupMixin, viewsets.ModelViewSet):
             "-created_at"
         )
 
+    def _unread_count(self) -> int:
+        return self.get_queryset().filter(is_read=False).count()
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        # Compteur global (pas limité à la page courante).
+        if isinstance(response.data, dict):
+            response.data["unread_count"] = self._unread_count()
+        return response
+
+    @decorators.action(detail=False, methods=["get"], url_path="unread-count")
+    def unread_count(self, request):
+        return Response({"unread_count": self._unread_count()})
+
     @decorators.action(detail=False, methods=['post'], url_path='register-device')
     def register_device(self, request):
         token = request.data.get('token')
@@ -67,13 +81,23 @@ class NotificationViewSet(UUIDLookupMixin, viewsets.ModelViewSet):
     def read(self, request, pk=None):
         notification = self.get_object()
         notification.is_read = True
-        notification.save()
-        return Response({"status": "notification marked as read"})
+        notification.save(update_fields=["is_read"])
+        return Response(
+            {
+                "status": "notification marked as read",
+                "unread_count": self._unread_count(),
+            }
+        )
 
     @decorators.action(detail=False, methods=['post'], url_path='read-all')
     def read_all(self, request):
         self.get_queryset().filter(is_read=False).update(is_read=True)
-        return Response({"status": "all notifications marked as read"})
+        return Response(
+            {
+                "status": "all notifications marked as read",
+                "unread_count": 0,
+            }
+        )
 
     @decorators.action(detail=False, methods=['post'], url_path='send')
     def send_notification(self, request):

@@ -25,7 +25,11 @@ class CustomUserManager(BaseUserManager):
         role = normalize_role(extra_fields.pop('role', ROLE_CLIENT))
         user = self.model(email=email, role=role, **extra_fields)
         apply_role_flags(user)
-        user.set_password(password)
+        # Google / social : password=None → mot de passe inutilisable.
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
         user.save(using=self._db)
         return user
 

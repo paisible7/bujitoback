@@ -246,18 +246,32 @@ class GoogleLoginView(APIView):
         user = User.objects.filter(email__iexact=email).first()
         created = False
         if user is None:
-            user = User.objects.create_user(
-                email=email,
-                password=None,
-                role=ROLE_CLIENT,
-                full_name=full_name,
-                phone_number=None,
-                city='',
-            )
-            user.set_unusable_password()
-            user.is_active = True
-            user.save()
-            created = True
+            try:
+                user = User.objects.create_user(
+                    email=email,
+                    password=None,
+                    role=ROLE_CLIENT,
+                    full_name=full_name or '',
+                    city='',
+                )
+            except Exception as exc:  # noqa: BLE001
+                from django.db import IntegrityError
+
+                if isinstance(exc, IntegrityError):
+                    # Course rare : compte créé entre le filter et le create.
+                    user = User.objects.filter(email__iexact=email).first()
+                    if user is None:
+                        return Response(
+                            {'message': 'Impossible de créer le compte Google.'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    created = False
+                else:
+                    raise
+            else:
+                user.is_active = True
+                user.save(update_fields=['is_active'])
+                created = True
         else:
             if not user.is_active:
                 return Response(
